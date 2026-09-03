@@ -34,7 +34,12 @@ int main(int argc, const char *argv[])
 {
     std::vector<std::string> argumentList;
 #if !defined(DEDICATED) || !DEDICATED
+#ifdef __APPLE__
+    // The client is wrapped in an app bundle on macOS, not a flat executable.
+    const char *programName = "openmohaa.app/Contents/MacOS/openmohaa";
+#else
     const char *programName = "openmohaa" DLL_SUFFIX EXE_EXT;
+#endif
 #else
     const char *programName = "omohaaded" DLL_SUFFIX EXE_EXT;
 #endif

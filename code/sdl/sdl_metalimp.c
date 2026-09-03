@@ -19,16 +19,36 @@ along with Quake III Arena source code; if not, write to the Free Software
 Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
+/*
+** sdl_metalimp.c
+**
+** Window/context creation for the Metal renderer target: same job as
+** sdl_glimp.c, but instead of a real SDL_GL_CreateContext, this drives
+** Google's ANGLE (its Metal backend) through EGL against an SDL Metal view's
+** CAMetalLayer. ANGLE translates the GLES3 calls the renderer makes into
+** native Metal, bypassing Apple's slow generic OpenGL-over-Metal shim.
+**
+** This backend is always used with the GL2 renderer sources (never GL1), so
+** unlike sdl_glimp.c there is no fixed-function/ES-vs-desktop branching here:
+** it's GLES3 via ANGLE, full stop.
+*/
 
 #ifdef USE_INTERNAL_SDL_HEADERS
 #	include "SDL.h"
+#	include "SDL_metal.h"
 #else
 #	include <SDL.h>
+#	include <SDL_metal.h>
 #endif
+
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <EGL/eglext_angle.h>
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 #include "../renderercommon/tr_common.h"
@@ -46,13 +66,16 @@ typedef enum
 } rserr_t;
 
 SDL_Window *SDL_window = NULL;
-static SDL_GLContext SDL_glContext = NULL;
 
-cvar_t *r_allowSoftwareGL; // Don't abort out if a hardware visual can't be obtained
+static SDL_MetalView metalView = NULL;
+static EGLDisplay eglDisplay = EGL_NO_DISPLAY;
+static EGLConfig  eglConfig;
+static EGLSurface eglSurface = EGL_NO_SURFACE;
+static EGLContext eglContext = EGL_NO_CONTEXT;
+
 cvar_t *r_allowResize; // make window resizable
 cvar_t *r_centerWindow;
 cvar_t *r_sdlDriver;
-cvar_t *r_preferOpenGLES;
 
 int qglMajorVersion, qglMinorVersion;
 int qglesMajorVersion, qglesMinorVersion;
@@ -83,12 +106,182 @@ QGL_EXT_direct_state_access_PROCS;
 
 /*
 ===============
+Metal_InitDisplay
+
+Creates the EGLDisplay for ANGLE's Metal backend, if not already created.
+This is a process-wide connection to the driver, independent of any
+particular window, so it's created once and reused across mode changes.
+===============
+*/
+static qboolean Metal_InitDisplay( void )
+{
+	EGLAttrib displayAttribs[] = {
+		EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+		EGL_NONE,
+	};
+	EGLint major, minor;
+
+	if ( eglDisplay != EGL_NO_DISPLAY )
+		return qtrue;
+
+	eglDisplay = eglGetPlatformDisplay( EGL_PLATFORM_ANGLE_ANGLE, (void *)EGL_DEFAULT_DISPLAY, displayAttribs );
+	if ( eglDisplay == EGL_NO_DISPLAY )
+	{
+		ri.Printf( PRINT_ALL, "eglGetPlatformDisplay failed: 0x%x\n", eglGetError() );
+		return qfalse;
+	}
+
+	if ( !eglInitialize( eglDisplay, &major, &minor ) )
+	{
+		ri.Printf( PRINT_ALL, "eglInitialize failed: 0x%x\n", eglGetError() );
+		eglDisplay = EGL_NO_DISPLAY;
+		return qfalse;
+	}
+
+	ri.Printf( PRINT_ALL, "EGL %d.%d via ANGLE (%s)\n", major, minor, eglQueryString( eglDisplay, EGL_VERSION ) );
+
+	return qtrue;
+}
+
+/*
+===============
+Metal_CreateSurfaceAndContext
+
+Picks an EGL config against the given CAMetalLayer and creates a GLES3
+context+surface for it, retrying once with relaxed requirements if the
+requested depth/stencil/MSAA combination isn't available.
+===============
+*/
+static qboolean Metal_CreateSurfaceAndContext( void *metalLayer, int depthBits, int stencilBits, int samples )
+{
+	EGLint numConfigs = 0;
+	EGLint configAttribs[16];
+	int i;
+	EGLint contextAttribs[] = {
+		EGL_CONTEXT_MAJOR_VERSION, 3,
+		EGL_CONTEXT_MINOR_VERSION, 0,
+		EGL_NONE,
+	};
+
+	i = 0;
+	configAttribs[i++] = EGL_SURFACE_TYPE;    configAttribs[i++] = EGL_WINDOW_BIT;
+	configAttribs[i++] = EGL_RENDERABLE_TYPE; configAttribs[i++] = EGL_OPENGL_ES3_BIT;
+	configAttribs[i++] = EGL_RED_SIZE;        configAttribs[i++] = 8;
+	configAttribs[i++] = EGL_GREEN_SIZE;      configAttribs[i++] = 8;
+	configAttribs[i++] = EGL_BLUE_SIZE;       configAttribs[i++] = 8;
+	configAttribs[i++] = EGL_ALPHA_SIZE;      configAttribs[i++] = 8;
+	configAttribs[i++] = EGL_DEPTH_SIZE;      configAttribs[i++] = depthBits;
+	configAttribs[i++] = EGL_STENCIL_SIZE;    configAttribs[i++] = stencilBits;
+	configAttribs[i++] = EGL_NONE;
+
+	if ( !eglChooseConfig( eglDisplay, configAttribs, &eglConfig, 1, &numConfigs ) || numConfigs == 0 )
+	{
+		ri.Printf( PRINT_ALL, "...requested EGL config unavailable (depth=%d stencil=%d), retrying with defaults\n",
+			depthBits, stencilBits );
+
+		i = 0;
+		configAttribs[i++] = EGL_SURFACE_TYPE;    configAttribs[i++] = EGL_WINDOW_BIT;
+		configAttribs[i++] = EGL_RENDERABLE_TYPE; configAttribs[i++] = EGL_OPENGL_ES3_BIT;
+		configAttribs[i++] = EGL_RED_SIZE;        configAttribs[i++] = 8;
+		configAttribs[i++] = EGL_GREEN_SIZE;      configAttribs[i++] = 8;
+		configAttribs[i++] = EGL_BLUE_SIZE;       configAttribs[i++] = 8;
+		configAttribs[i++] = EGL_DEPTH_SIZE;      configAttribs[i++] = 24;
+		configAttribs[i++] = EGL_STENCIL_SIZE;    configAttribs[i++] = 8;
+		configAttribs[i++] = EGL_NONE;
+
+		if ( !eglChooseConfig( eglDisplay, configAttribs, &eglConfig, 1, &numConfigs ) || numConfigs == 0 )
+		{
+			ri.Printf( PRINT_ALL, "eglChooseConfig failed: 0x%x\n", eglGetError() );
+			return qfalse;
+		}
+	}
+
+	// Multisampling is intentionally not requested through the EGL config:
+	// GL2's postprocess pipeline does its own offscreen FBO rendering and
+	// resolve, and ANGLE's Metal-backed default framebuffer MSAA support is
+	// not something we've validated here. r_ext_multisample stays a no-op
+	// for this backend rather than risk eglChooseConfig failing outright.
+	(void)samples;
+
+	eglSurface = eglCreateWindowSurface( eglDisplay, eglConfig, (EGLNativeWindowType)metalLayer, NULL );
+	if ( eglSurface == EGL_NO_SURFACE )
+	{
+		ri.Printf( PRINT_ALL, "eglCreateWindowSurface failed: 0x%x\n", eglGetError() );
+		return qfalse;
+	}
+
+	eglContext = eglCreateContext( eglDisplay, eglConfig, EGL_NO_CONTEXT, contextAttribs );
+	if ( eglContext == EGL_NO_CONTEXT )
+	{
+		ri.Printf( PRINT_ALL, "eglCreateContext failed: 0x%x\n", eglGetError() );
+		eglDestroySurface( eglDisplay, eglSurface );
+		eglSurface = EGL_NO_SURFACE;
+		return qfalse;
+	}
+
+	if ( !eglMakeCurrent( eglDisplay, eglSurface, eglSurface, eglContext ) )
+	{
+		ri.Printf( PRINT_ALL, "eglMakeCurrent failed: 0x%x\n", eglGetError() );
+		eglDestroyContext( eglDisplay, eglContext );
+		eglContext = EGL_NO_CONTEXT;
+		eglDestroySurface( eglDisplay, eglSurface );
+		eglSurface = EGL_NO_SURFACE;
+		return qfalse;
+	}
+
+	return qtrue;
+}
+
+/*
+===============
+Metal_DestroySurfaceAndContext
+
+Tears down the current surface+context, but leaves the EGLDisplay (and the
+ANGLE driver connection it represents) alive for reuse by the next mode set.
+===============
+*/
+static void Metal_DestroySurfaceAndContext( void )
+{
+	if ( eglDisplay == EGL_NO_DISPLAY )
+		return;
+
+	eglMakeCurrent( eglDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT );
+
+	if ( eglContext != EGL_NO_CONTEXT )
+	{
+		eglDestroyContext( eglDisplay, eglContext );
+		eglContext = EGL_NO_CONTEXT;
+	}
+
+	if ( eglSurface != EGL_NO_SURFACE )
+	{
+		eglDestroySurface( eglDisplay, eglSurface );
+		eglSurface = EGL_NO_SURFACE;
+	}
+}
+
+/*
+===============
 GLimp_Shutdown
 ===============
 */
 void GLimp_Shutdown( void )
 {
 	ri.IN_Shutdown();
+
+	Metal_DestroySurfaceAndContext();
+
+	if ( eglDisplay != EGL_NO_DISPLAY )
+	{
+		eglTerminate( eglDisplay );
+		eglDisplay = EGL_NO_DISPLAY;
+	}
+
+	if ( metalView != NULL )
+	{
+		SDL_Metal_DestroyView( metalView );
+		metalView = NULL;
+	}
 
 	SDL_QuitSubSystem( SDL_INIT_VIDEO );
 }
@@ -104,7 +297,6 @@ void GLimp_Minimize( void )
 {
 	SDL_MinimizeWindow( SDL_window );
 }
-
 
 /*
 ===============
@@ -140,7 +332,6 @@ static int GLimp_CompareModes( const void *a, const void *b )
 	else
 		return areaA - areaB;
 }
-
 
 /*
 ===============
@@ -234,6 +425,9 @@ static void GLimp_DetectAvailableModes(void)
 /*
 ===============
 OpenGL ES compatibility
+
+GLES has no ClearDepth/DepthRange/DrawBuffer/PolygonMode entry points; these
+back the QGL_DESKTOP_1_1_PROCS pointers the shared renderer code still calls.
 ===============
 */
 static void APIENTRY GLimp_GLES_ClearDepth( GLclampd depth ) {
@@ -256,24 +450,21 @@ static void APIENTRY GLimp_GLES_PolygonMode( GLenum face, GLenum mode ) {
 ===============
 GLimp_GetProcAddresses
 
-Get addresses for OpenGL functions.
+Get addresses for OpenGL ES functions, resolved through ANGLE's
+eglGetProcAddress rather than SDL_GL_GetProcAddress (which requires a
+context SDL itself created).
 ===============
 */
-static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
+static qboolean GLimp_GetProcAddresses( void ) {
 	qboolean success = qtrue;
 	const char *version;
 
-#ifdef __SDL_NOGETPROCADDR__
-#define GLE( ret, name, ... ) qgl##name = gl#name;
-#else
-#define GLE( ret, name, ... ) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name); \
+#define GLE( ret, name, ... ) qgl##name = (name##proc *) eglGetProcAddress("gl" #name); \
 	if ( qgl##name == NULL ) { \
 		ri.Printf( PRINT_ALL, "ERROR: Missing OpenGL function %s\n", "gl" #name ); \
 		success = qfalse; \
 	}
-#endif
 
-	// OpenGL 1.0 and OpenGL ES 1.0
 	GLE(const GLubyte *, GetString, GLenum name)
 
 	if ( !qglGetString ) {
@@ -289,84 +480,54 @@ static qboolean GLimp_GetProcAddresses( qboolean fixedFunction ) {
 	if ( Q_stricmpn( "OpenGL ES", version, 9 ) == 0 ) {
 		char profile[6]; // ES, ES-CM, or ES-CL
 		sscanf( version, "OpenGL %5s %d.%d", profile, &qglesMajorVersion, &qglesMinorVersion );
-		// common lite profile (no floating point) is not supported
-		if ( Q_stricmp( profile, "ES-CL" ) == 0 ) {
-			qglesMajorVersion = 0;
-			qglesMinorVersion = 0;
-		}
 	} else {
 		sscanf( version, "%d.%d", &qglMajorVersion, &qglMinorVersion );
 	}
 
-	if ( fixedFunction ) {
-		if ( QGL_VERSION_ATLEAST( 1, 1 ) ) {
-			QGL_1_1_PROCS;
-			QGL_1_1_FIXED_FUNCTION_PROCS;
-			QGL_DESKTOP_1_1_PROCS;
-			QGL_DESKTOP_1_1_FIXED_FUNCTION_PROCS;
-		} else if ( qglesMajorVersion == 1 && qglesMinorVersion >= 1 ) {
-			// OpenGL ES 1.1 (2.0 is not backward compatible)
-			QGL_1_1_PROCS;
-			QGL_1_1_FIXED_FUNCTION_PROCS;
-			QGL_ES_1_1_PROCS;
-			QGL_ES_1_1_FIXED_FUNCTION_PROCS;
-			// error so this doesn't segfault due to NULL desktop GL functions being used
-			Com_Error( ERR_FATAL, "Unsupported OpenGL Version: %s", version );
-		} else {
-			Com_Error( ERR_FATAL, "Unsupported OpenGL Version (%s), OpenGL 1.1 is required", version );
-		}
-		// Added in OPM
-		//  Add compression-related GL functions for the renderer
-		if ( QGL_VERSION_ATLEAST( 1, 3 ) ) {
-			QGL_1_3_PROCS;
-		}
-	} else {
-		if ( QGL_VERSION_ATLEAST( 2, 0 ) ) {
-			QGL_1_1_PROCS;
-			QGL_DESKTOP_1_1_PROCS;
-			QGL_1_3_PROCS;
-			QGL_1_5_PROCS;
-			QGL_2_0_PROCS;
-		} else if ( QGLES_VERSION_ATLEAST( 2, 0 ) ) {
-			QGL_1_1_PROCS;
-			QGL_ES_1_1_PROCS;
-			QGL_1_3_PROCS;
-			QGL_1_5_PROCS;
-			QGL_2_0_PROCS;
-
-			qglClearDepth = GLimp_GLES_ClearDepth;
-			qglDepthRange = GLimp_GLES_DepthRange;
-			qglDrawBuffer = GLimp_GLES_DrawBuffer;
-			qglPolygonMode = GLimp_GLES_PolygonMode;
-		} else {
-			Com_Error( ERR_FATAL, "Unsupported OpenGL Version (%s), OpenGL 2.0 is required", version );
-		}
+	if ( !QGLES_VERSION_ATLEAST( 2, 0 ) ) {
+		Com_Error( ERR_FATAL, "Unexpected GL_VERSION from ANGLE (%s), OpenGL ES 2.0+ was expected", version );
 	}
 
-	if ( QGL_VERSION_ATLEAST( 3, 0 ) || QGLES_VERSION_ATLEAST( 3, 0 ) ) {
+	// QGL_1_1_PROCS is documented as "OpenGL 1.0/1.1, OpenGL ES 1.0, and
+	// OpenGL 3.2 core profile", but it actually also lists a handful of
+	// desktop-only compatibility entry points (glCallList, glDrawPixels,
+	// glFogi, glLineStipple, glPixelZoom) that don't exist under GLES or a
+	// real core profile. This has never surfaced before because Apple's
+	// OpenGL.framework returns a valid address for every symbol regardless
+	// of the active profile - a loader that actually reflects availability,
+	// like ANGLE's, exposes it. GL2 never calls any of these five (the only
+	// call sites are dead #if 0 code), so resolve this group best-effort
+	// instead of treating a miss as fatal.
+#undef GLE
+#define GLE( ret, name, ... ) qgl##name = (name##proc *) eglGetProcAddress("gl" #name); \
+	if ( qgl##name == NULL ) { \
+		ri.Printf( PRINT_DEVELOPER, "Not available under GLES: %s\n", "gl" #name ); \
+	}
+	QGL_1_1_PROCS;
+#undef GLE
+#define GLE( ret, name, ... ) qgl##name = (name##proc *) eglGetProcAddress("gl" #name); \
+	if ( qgl##name == NULL ) { \
+		ri.Printf( PRINT_ALL, "ERROR: Missing OpenGL function %s\n", "gl" #name ); \
+		success = qfalse; \
+	}
+
+	QGL_ES_1_1_PROCS;
+	QGL_1_3_PROCS;
+	QGL_1_5_PROCS;
+	QGL_2_0_PROCS;
+
+	qglClearDepth = GLimp_GLES_ClearDepth;
+	qglDepthRange = GLimp_GLES_DepthRange;
+	qglDrawBuffer = GLimp_GLES_DrawBuffer;
+	qglPolygonMode = GLimp_GLES_PolygonMode;
+
+	if ( QGLES_VERSION_ATLEAST( 3, 0 ) ) {
 		QGL_3_0_PROCS;
 	}
 
 #undef GLE
 
 	return success;
-}
-
-/*
-===============
-GLimp_GetProcAddress / GLimp_ExtensionSupported
-
-Forward to SDL's own tracking, valid here since this backend always creates
-its context via SDL_GL_CreateContext. See qgl.h for why this indirection
-exists at all.
-===============
-*/
-void *GLimp_GetProcAddress( const char *name ) {
-	return SDL_GL_GetProcAddress( name );
-}
-
-qboolean GLimp_ExtensionSupported( const char *extension ) {
-	return SDL_GL_ExtensionSupported( extension ) ? qtrue : qfalse;
 }
 
 /*
@@ -411,29 +572,59 @@ static void GLimp_ClearProcAddresses( void ) {
 
 /*
 ===============
+GLimp_GetProcAddress / GLimp_ExtensionSupported
+
+See qgl.h for why this indirection exists: tr_extensions.c needs to resolve
+a handful of procs and check extensions outside of GLimp_Init's own setup,
+and SDL_GL_GetProcAddress/SDL_GL_ExtensionSupported don't work without an
+SDL-created GL context. GLimp_ExtensionSupported checks against
+glConfig.extensions_string, which GLimp_Init always builds before any code
+that might call this.
+===============
+*/
+void *GLimp_GetProcAddress( const char *name ) {
+	return (void *)eglGetProcAddress( name );
+}
+
+qboolean GLimp_ExtensionSupported( const char *extension ) {
+	const char *extensions = glConfig.extensions_string;
+	size_t len = strlen( extension );
+	const char *p = extensions;
+
+	if ( !extensions ) {
+		return qfalse;
+	}
+
+	while ( ( p = strstr( p, extension ) ) != NULL ) {
+		const char *end = p + len;
+		if ( ( p == extensions || p[-1] == ' ' ) && ( *end == ' ' || *end == '\0' ) ) {
+			return qtrue;
+		}
+		p = end;
+	}
+
+	return qfalse;
+}
+
+/*
+===============
 GLimp_SetMode
 ===============
 */
-static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qboolean fixedFunction)
+static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder)
 {
-	struct GLimp_ContextType {
-		int profileMask;
-		int majorVersion;
-		int minorVersion;
-	} contexts[4];
-	int numContexts, type;
 	const char *glstring;
-	int perChannelColorBits;
 	int colorBits, depthBits, stencilBits;
 	int samples;
-	int i = 0;
 	SDL_Surface *icon = NULL;
-	Uint32 flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI;
+	Uint32 flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_METAL | SDL_WINDOW_ALLOW_HIGHDPI;
 	SDL_DisplayMode desktopMode;
 	int display = 0;
 	int x = SDL_WINDOWPOS_UNDEFINED, y = SDL_WINDOWPOS_UNDEFINED;
+	void *metalLayer;
+	int realColorBits[3], realDepthBits, realStencilBits;
 
-	ri.Printf( PRINT_ALL, "Initializing OpenGL display\n");
+	ri.Printf( PRINT_ALL, "Initializing Metal (ANGLE) display\n");
 
 	if ( r_allowResize->integer )
 		flags |= SDL_WINDOW_RESIZABLE;
@@ -484,13 +675,10 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 	{
 		// Use desktop video resolution. This also applies whenever fullscreen is
 		// requested (regardless of which resolution mode was actually selected):
-		// fullscreen is now always presented via SDL_WINDOW_FULLSCREEN_DESKTOP
-		// (a borderless window sized to the desktop) rather than an exclusive
+		// fullscreen is always presented via SDL_WINDOW_FULLSCREEN_DESKTOP (a
+		// borderless window sized to the desktop) rather than an exclusive
 		// display mode switch, since real mode switching to a non-native
-		// resolution is unreliable on macOS. Rendering at anything other than
-		// the desktop's actual pixel dimensions here would leave the window
-		// correctly full-screen but only partially drawn into. Custom/numbered
-		// resolutions still apply normally when not fullscreen.
+		// resolution is unreliable on macOS.
 		if( desktopMode.h > 0 )
 		{
 			glConfig.vidWidth = desktopMode.w;
@@ -509,6 +697,7 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 	else if ( !R_GetModeInfo( &glConfig.vidWidth, &glConfig.vidHeight, &glConfig.windowAspect, mode ) )
 	{
 		ri.Printf( PRINT_ALL, " invalid mode\n" );
+		SDL_FreeSurface( icon );
 		return RSERR_INVALID_MODE;
 	}
 	ri.Printf( PRINT_ALL, " %d %d\n", glConfig.vidWidth, glConfig.vidHeight);
@@ -521,11 +710,13 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 	}
 
 	// Destroy existing state if it exists
-	if( SDL_glContext != NULL )
+	GLimp_ClearProcAddresses();
+	Metal_DestroySurfaceAndContext();
+
+	if( metalView != NULL )
 	{
-		GLimp_ClearProcAddresses();
-		SDL_GL_DeleteContext( SDL_glContext );
-		SDL_glContext = NULL;
+		SDL_Metal_DestroyView( metalView );
+		metalView = NULL;
 	}
 
 	if( SDL_window != NULL )
@@ -538,12 +729,6 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 
 	if( fullscreen )
 	{
-		// Use borderless-fullscreen-at-desktop-resolution rather than exclusive
-		// display mode switching: on macOS, switching the real display mode to a
-		// non-native resolution is unreliable and can silently fall back to a
-		// windowed presentation instead of covering the screen. Rendering at a
-		// non-native resolution is still possible via r_customwidth/r_customheight
-		// while windowed; it just no longer drives an OS-level mode switch.
 		flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 		glConfig.isFullscreen = qtrue;
 	}
@@ -559,309 +744,90 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 	if ((!colorBits) || (colorBits >= 32))
 		colorBits = 24;
 
-	if (!r_depthbits->value)
-		depthBits = 24;
-	else
-		depthBits = r_depthbits->value;
-
+	depthBits = r_depthbits->value ? r_depthbits->value : 24;
 	stencilBits = r_stencilbits->value;
 	samples = r_ext_multisample->value;
 
-	numContexts = 0;
-
-	if ( !fixedFunction ) {
-		int profileMask;
-		qboolean preferOpenGLES;
-
-		SDL_GL_ResetAttributes();
-		SDL_GL_GetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, &profileMask );
-
-		preferOpenGLES = ( r_preferOpenGLES->integer == 1 ||
-		                 ( r_preferOpenGLES->integer == -1 && profileMask == SDL_GL_CONTEXT_PROFILE_ES ) );
-
-		if ( preferOpenGLES ) {
-#ifdef __EMSCRIPTEN__
-			// WebGL 2.0 isn't fully backward compatible so you have to ask for it specifically
-			contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
-			contexts[numContexts].majorVersion = 3;
-			contexts[numContexts].minorVersion = 0;
-			numContexts++;
-#endif
-
-			contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
-			contexts[numContexts].majorVersion = 2;
-			contexts[numContexts].minorVersion = 0;
-			numContexts++;
-		}
-
-		contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_CORE;
-		contexts[numContexts].majorVersion = 3;
-		contexts[numContexts].minorVersion = 2;
-		numContexts++;
-
-		contexts[numContexts].profileMask = 0;
-		contexts[numContexts].majorVersion = 2;
-		contexts[numContexts].minorVersion = 0;
-		numContexts++;
-
-		if ( !preferOpenGLES ) {
-#ifdef __EMSCRIPTEN__
-			contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
-			contexts[numContexts].majorVersion = 3;
-			contexts[numContexts].minorVersion = 0;
-			numContexts++;
-#endif
-
-			contexts[numContexts].profileMask = SDL_GL_CONTEXT_PROFILE_ES;
-			contexts[numContexts].majorVersion = 2;
-			contexts[numContexts].minorVersion = 0;
-			numContexts++;
-		}
-	} else {
-		contexts[numContexts].profileMask = 0;
-		contexts[numContexts].majorVersion = 1;
-		contexts[numContexts].minorVersion = 1;
-		numContexts++;
-	}
-
-	for (i = 0; i < 16; i++)
+	if( r_stereoEnabled->integer )
 	{
-		int testColorBits, testDepthBits, testStencilBits;
-		int realColorBits[3];
-
-		// 0 - default
-		// 1 - minus colorBits
-		// 2 - minus depthBits
-		// 3 - minus stencil
-		if ((i % 4) == 0 && i)
-		{
-			// one pass, reduce
-			switch (i / 4)
-			{
-				case 2 :
-					if (colorBits == 24)
-						colorBits = 16;
-					break;
-				case 1 :
-					if (depthBits == 24)
-						depthBits = 16;
-					else if (depthBits == 16)
-						depthBits = 8;
-				case 3 :
-					if (stencilBits == 24)
-						stencilBits = 16;
-					else if (stencilBits == 16)
-						stencilBits = 8;
-			}
-		}
-
-		testColorBits = colorBits;
-		testDepthBits = depthBits;
-		testStencilBits = stencilBits;
-
-		if ((i % 4) == 3)
-		{ // reduce colorBits
-			if (testColorBits == 24)
-				testColorBits = 16;
-		}
-
-		if ((i % 4) == 2)
-		{ // reduce depthBits
-			if (testDepthBits == 24)
-				testDepthBits = 16;
-			else if (testDepthBits == 16)
-				testDepthBits = 8;
-		}
-
-		if ((i % 4) == 1)
-		{ // reduce stencilBits
-			if (testStencilBits == 24)
-				testStencilBits = 16;
-			else if (testStencilBits == 16)
-				testStencilBits = 8;
-			else
-				testStencilBits = 0;
-		}
-
-		if (testColorBits == 24)
-			perChannelColorBits = 8;
-		else
-			perChannelColorBits = 4;
-
-#ifdef __sgi /* Fix for SGIs grabbing too many bits of color */
-		if (perChannelColorBits == 4)
-			perChannelColorBits = 0; /* Use minimum size for 16-bit color */
-
-		/* Need alpha or else SGIs choose 36+ bit RGB mode */
-		SDL_GL_SetAttribute( SDL_GL_ALPHA_SIZE, 1);
-#endif
-
-		SDL_GL_SetAttribute( SDL_GL_RED_SIZE, perChannelColorBits );
-		SDL_GL_SetAttribute( SDL_GL_GREEN_SIZE, perChannelColorBits );
-		SDL_GL_SetAttribute( SDL_GL_BLUE_SIZE, perChannelColorBits );
-		SDL_GL_SetAttribute( SDL_GL_DEPTH_SIZE, testDepthBits );
-		SDL_GL_SetAttribute( SDL_GL_STENCIL_SIZE, testStencilBits );
-
-		SDL_GL_SetAttribute( SDL_GL_MULTISAMPLEBUFFERS, samples ? 1 : 0 );
-		SDL_GL_SetAttribute( SDL_GL_MULTISAMPLESAMPLES, samples );
-
-		if(r_stereoEnabled->integer)
-		{
-			glConfig.stereoEnabled = qtrue;
-			SDL_GL_SetAttribute(SDL_GL_STEREO, 1);
-		}
-		else
-		{
-			glConfig.stereoEnabled = qfalse;
-			SDL_GL_SetAttribute(SDL_GL_STEREO, 0);
-		}
-		
-		SDL_GL_SetAttribute( SDL_GL_DOUBLEBUFFER, 1 );
-
-#if 0 // if multisampling is enabled on X11, this causes create window to fail.
-		// If not allowing software GL, demand accelerated
-		if( !r_allowSoftwareGL->integer )
-			SDL_GL_SetAttribute( SDL_GL_ACCELERATED_VISUAL, 1 );
-#endif
-
-		for ( type = 0; type < numContexts; type++ ) {
-			char contextName[32];
-
-			switch ( contexts[type].profileMask ) {
-				default:
-				case 0:
-					Com_sprintf( contextName, sizeof( contextName ), "OpenGL %d.%d",
-					             contexts[type].majorVersion, contexts[type].minorVersion );
-					break;
-				case SDL_GL_CONTEXT_PROFILE_CORE:
-					Com_sprintf( contextName, sizeof( contextName ), "OpenGL %d.%d Core",
-					             contexts[type].majorVersion, contexts[type].minorVersion );
-					break;
-				case SDL_GL_CONTEXT_PROFILE_ES:
-					Com_sprintf( contextName, sizeof( contextName ), "OpenGL ES %d.%d",
-					             contexts[type].majorVersion, contexts[type].minorVersion );
-					break;
-			}
-
-			SDL_GL_SetAttribute( SDL_GL_CONTEXT_PROFILE_MASK, contexts[type].profileMask );
-			SDL_GL_SetAttribute( SDL_GL_CONTEXT_MAJOR_VERSION, contexts[type].majorVersion );
-			SDL_GL_SetAttribute( SDL_GL_CONTEXT_MINOR_VERSION, contexts[type].minorVersion );
-
-			if( ( SDL_window = SDL_CreateWindow( CLIENT_WINDOW_TITLE, x, y,
-					glConfig.vidWidth, glConfig.vidHeight, flags ) ) == NULL )
-			{
-				ri.Printf( PRINT_DEVELOPER, "SDL_CreateWindow failed: %s\n", SDL_GetError( ) );
-				break;
-			}
-
-			SDL_glContext = SDL_GL_CreateContext( SDL_window );
-			if ( !SDL_glContext )
-			{
-				SDL_DestroyWindow( SDL_window );
-				SDL_window = NULL;
-				ri.Printf( PRINT_ALL, "SDL_GL_CreateContext() for %s context failed: %s\n", contextName, SDL_GetError() );
-				continue;
-			}
-
-			if ( !GLimp_GetProcAddresses( fixedFunction ) )
-			{
-				ri.Printf( PRINT_ALL, "GLimp_GetProcAddresses() for %s context failed\n", contextName );
-				GLimp_ClearProcAddresses();
-				SDL_GL_DeleteContext( SDL_glContext );
-				SDL_glContext = NULL;
-				SDL_DestroyWindow( SDL_window );
-				SDL_window = NULL;
-				continue;
-			}
-
-			if ( contexts[type].profileMask == SDL_GL_CONTEXT_PROFILE_CORE ) {
-				const char *renderer;
-
-				renderer = (const char *)qglGetString( GL_RENDERER );
-
-				if ( !renderer || strstr( renderer, "Software Renderer" ) || strstr( renderer, "Software Rasterizer" ) )
-				{
-					ri.Printf( PRINT_ALL, "GL_RENDERER is %s, rejecting %s context\n", renderer, contextName );
-
-					GLimp_ClearProcAddresses();
-					SDL_GL_DeleteContext( SDL_glContext );
-					SDL_glContext = NULL;
-					SDL_DestroyWindow( SDL_window );
-					SDL_window = NULL;
-					continue;
-				}
-			}
-
-			break;
-		}
-
-		if ( !SDL_window ) {
-			continue;
-		}
-
-		if ( !SDL_glContext ) {
-			SDL_DestroyWindow( SDL_window );
-			SDL_window = NULL;
-			continue;
-		}
-
-		// Only exclusive fullscreen (SDL_WINDOW_FULLSCREEN without the _DESKTOP bit)
-		// needs an explicit display mode set; fullscreen-at-desktop-resolution uses
-		// whatever the desktop is already running and ignores this.
-		if( fullscreen && ( flags & SDL_WINDOW_FULLSCREEN_DESKTOP ) == SDL_WINDOW_FULLSCREEN )
-		{
-			SDL_DisplayMode desiredMode;
-
-			switch( testColorBits )
-			{
-				case 16: desiredMode.format = SDL_PIXELFORMAT_RGB565; break;
-				case 24: desiredMode.format = SDL_PIXELFORMAT_RGB24;  break;
-				default: ri.Printf( PRINT_DEVELOPER, "testColorBits is %d, can't fullscreen\n", testColorBits ); continue;
-			}
-
-			desiredMode.w = glConfig.vidWidth;
-			desiredMode.h = glConfig.vidHeight;
-			desiredMode.refresh_rate = glConfig.displayFrequency = ri.Cvar_VariableIntegerValue( "r_displayRefresh" );
-			desiredMode.driverdata = NULL;
-
-			if( SDL_SetWindowDisplayMode( SDL_window, &desiredMode ) < 0 )
-			{
-				ri.Printf( PRINT_DEVELOPER, "SDL_SetWindowDisplayMode failed: %s\n", SDL_GetError( ) );
-				continue;
-			}
-		}
-
-		SDL_SetWindowIcon( SDL_window, icon );
-
-		qglClearColor( 0, 0, 0, 1 );
-		qglClear( GL_COLOR_BUFFER_BIT );
-		SDL_GL_SwapWindow( SDL_window );
-
-		if( SDL_GL_SetSwapInterval( r_swapInterval->integer ) == -1 )
-		{
-			ri.Printf( PRINT_DEVELOPER, "SDL_GL_SetSwapInterval failed: %s\n", SDL_GetError( ) );
-		}
-
-		SDL_GL_GetAttribute( SDL_GL_RED_SIZE, &realColorBits[0] );
-		SDL_GL_GetAttribute( SDL_GL_GREEN_SIZE, &realColorBits[1] );
-		SDL_GL_GetAttribute( SDL_GL_BLUE_SIZE, &realColorBits[2] );
-		SDL_GL_GetAttribute( SDL_GL_DEPTH_SIZE, &glConfig.depthBits );
-		SDL_GL_GetAttribute( SDL_GL_STENCIL_SIZE, &glConfig.stencilBits );
-
-		glConfig.colorBits = realColorBits[0] + realColorBits[1] + realColorBits[2];
-
-		ri.Printf( PRINT_ALL, "Using %d color bits, %d depth, %d stencil display.\n",
-				glConfig.colorBits, glConfig.depthBits, glConfig.stencilBits );
-		break;
+		ri.Printf( PRINT_ALL, "...stereo rendering is not supported by the Metal renderer, ignoring r_stereoEnabled\n" );
 	}
+	glConfig.stereoEnabled = qfalse;
 
-	SDL_FreeSurface( icon );
-
-	if( !SDL_window )
+	if ( !Metal_InitDisplay() )
 	{
-		ri.Printf( PRINT_ALL, "Couldn't get a visual\n" );
+		SDL_FreeSurface( icon );
 		return RSERR_INVALID_MODE;
 	}
+
+	SDL_window = SDL_CreateWindow( CLIENT_WINDOW_TITLE, x, y,
+			glConfig.vidWidth, glConfig.vidHeight, flags );
+	if ( SDL_window == NULL )
+	{
+		ri.Printf( PRINT_ALL, "SDL_CreateWindow failed: %s\n", SDL_GetError() );
+		SDL_FreeSurface( icon );
+		return RSERR_INVALID_MODE;
+	}
+
+	metalView = SDL_Metal_CreateView( SDL_window );
+	if ( metalView == NULL )
+	{
+		ri.Printf( PRINT_ALL, "SDL_Metal_CreateView failed: %s\n", SDL_GetError() );
+		SDL_DestroyWindow( SDL_window );
+		SDL_window = NULL;
+		SDL_FreeSurface( icon );
+		return RSERR_INVALID_MODE;
+	}
+
+	metalLayer = SDL_Metal_GetLayer( metalView );
+
+	if ( !Metal_CreateSurfaceAndContext( metalLayer, depthBits, stencilBits, samples ) )
+	{
+		SDL_Metal_DestroyView( metalView );
+		metalView = NULL;
+		SDL_DestroyWindow( SDL_window );
+		SDL_window = NULL;
+		SDL_FreeSurface( icon );
+		return RSERR_INVALID_MODE;
+	}
+
+	if ( !GLimp_GetProcAddresses() )
+	{
+		ri.Printf( PRINT_ALL, "GLimp_GetProcAddresses() failed\n" );
+		GLimp_ClearProcAddresses();
+		Metal_DestroySurfaceAndContext();
+		SDL_Metal_DestroyView( metalView );
+		metalView = NULL;
+		SDL_DestroyWindow( SDL_window );
+		SDL_window = NULL;
+		SDL_FreeSurface( icon );
+		return RSERR_INVALID_MODE;
+	}
+
+	SDL_SetWindowIcon( SDL_window, icon );
+	SDL_FreeSurface( icon );
+
+	qglClearColor( 0, 0, 0, 1 );
+	qglClear( GL_COLOR_BUFFER_BIT );
+	eglSwapBuffers( eglDisplay, eglSurface );
+
+	if ( eglSwapInterval( eglDisplay, r_swapInterval->integer ) == EGL_FALSE )
+	{
+		ri.Printf( PRINT_DEVELOPER, "eglSwapInterval failed: 0x%x\n", eglGetError() );
+	}
+
+	eglGetConfigAttrib( eglDisplay, eglConfig, EGL_RED_SIZE, &realColorBits[0] );
+	eglGetConfigAttrib( eglDisplay, eglConfig, EGL_GREEN_SIZE, &realColorBits[1] );
+	eglGetConfigAttrib( eglDisplay, eglConfig, EGL_BLUE_SIZE, &realColorBits[2] );
+	eglGetConfigAttrib( eglDisplay, eglConfig, EGL_DEPTH_SIZE, &realDepthBits );
+	eglGetConfigAttrib( eglDisplay, eglConfig, EGL_STENCIL_SIZE, &realStencilBits );
+
+	glConfig.colorBits = realColorBits[0] + realColorBits[1] + realColorBits[2];
+	glConfig.depthBits = realDepthBits;
+	glConfig.stencilBits = realStencilBits;
+
+	ri.Printf( PRINT_ALL, "Using %d color bits, %d depth, %d stencil display.\n",
+			glConfig.colorBits, glConfig.depthBits, glConfig.stencilBits );
 
 	SDL_ShowWindow( SDL_window );
 
@@ -878,7 +844,7 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder, qbool
 GLimp_StartDriverAndSetMode
 ===============
 */
-static qboolean GLimp_StartDriverAndSetMode(int mode, qboolean fullscreen, qboolean noborder, qboolean gl3Core)
+static qboolean GLimp_StartDriverAndSetMode(int mode, qboolean fullscreen, qboolean noborder)
 {
 	rserr_t err;
 
@@ -904,8 +870,8 @@ static qboolean GLimp_StartDriverAndSetMode(int mode, qboolean fullscreen, qbool
 		r_fullscreen->modified = qfalse;
 		fullscreen = qfalse;
 	}
-	
-	err = GLimp_SetMode(mode, fullscreen, noborder, gl3Core);
+
+	err = GLimp_SetMode(mode, fullscreen, noborder);
 
 	switch ( err )
 	{
@@ -922,13 +888,12 @@ static qboolean GLimp_StartDriverAndSetMode(int mode, qboolean fullscreen, qbool
 	return qtrue;
 }
 
-
 /*
 ===============
 GLimp_InitExtensions
 ===============
 */
-static void GLimp_InitExtensions( qboolean fixedFunction )
+static void GLimp_InitExtensions( void )
 {
 	if ( !r_allowExtensions->integer )
 	{
@@ -941,8 +906,7 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 	glConfig.textureCompression = TC_NONE;
 
 	// GL_EXT_texture_compression_s3tc
-	if ( ( QGLES_VERSION_ATLEAST( 2, 0 ) || SDL_GL_ExtensionSupported( "GL_ARB_texture_compression" ) ) &&
-	     SDL_GL_ExtensionSupported( "GL_EXT_texture_compression_s3tc" ) )
+	if ( GLimp_ExtensionSupported( "GL_EXT_texture_compression_s3tc" ) )
 	{
 		if ( r_ext_compressed_textures->value )
 		{
@@ -959,116 +923,8 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 		ri.Printf( PRINT_ALL, "...GL_EXT_texture_compression_s3tc not found\n" );
 	}
 
-	// GL_S3_s3tc ... legacy extension before GL_EXT_texture_compression_s3tc.
-	if (glConfig.textureCompression == TC_NONE)
-	{
-		if ( SDL_GL_ExtensionSupported( "GL_S3_s3tc" ) )
-		{
-			if ( r_ext_compressed_textures->value )
-			{
-				glConfig.textureCompression = TC_S3TC;
-				ri.Printf( PRINT_ALL, "...using GL_S3_s3tc\n" );
-			}
-			else
-			{
-				ri.Printf( PRINT_ALL, "...ignoring GL_S3_s3tc\n" );
-			}
-		}
-		else
-		{
-			ri.Printf( PRINT_ALL, "...GL_S3_s3tc not found\n" );
-		}
-	}
-
-	// OpenGL 1 fixed function pipeline
-	if ( fixedFunction )
-	{
-		// GL_EXT_texture_env_add
-		glConfig.textureEnvAddAvailable = qfalse;
-		if ( SDL_GL_ExtensionSupported( "GL_EXT_texture_env_add" ) )
-		{
-			if ( r_ext_texture_env_add->integer )
-			{
-				glConfig.textureEnvAddAvailable = qtrue;
-				ri.Printf( PRINT_ALL, "...using GL_EXT_texture_env_add\n" );
-			}
-			else
-			{
-				glConfig.textureEnvAddAvailable = qfalse;
-				ri.Printf( PRINT_ALL, "...ignoring GL_EXT_texture_env_add\n" );
-			}
-		}
-		else
-		{
-			ri.Printf( PRINT_ALL, "...GL_EXT_texture_env_add not found\n" );
-		}
-
-		// GL_ARB_multitexture
-		qglMultiTexCoord2fARB = NULL;
-		qglActiveTextureARB = NULL;
-		qglClientActiveTextureARB = NULL;
-		if ( SDL_GL_ExtensionSupported( "GL_ARB_multitexture" ) )
-		{
-			if ( r_ext_multitexture->value )
-			{
-				qglMultiTexCoord2fARB = SDL_GL_GetProcAddress( "glMultiTexCoord2fARB" );
-				qglActiveTextureARB = SDL_GL_GetProcAddress( "glActiveTextureARB" );
-				qglClientActiveTextureARB = SDL_GL_GetProcAddress( "glClientActiveTextureARB" );
-
-				if ( qglActiveTextureARB )
-				{
-					GLint glint = 0;
-					qglGetIntegerv( GL_MAX_TEXTURE_UNITS_ARB, &glint );
-					glConfig.numTextureUnits = (int) glint;
-					if ( glConfig.numTextureUnits > 1 )
-					{
-						ri.Printf( PRINT_ALL, "...using GL_ARB_multitexture\n" );
-					}
-					else
-					{
-						qglMultiTexCoord2fARB = NULL;
-						qglActiveTextureARB = NULL;
-						qglClientActiveTextureARB = NULL;
-						ri.Printf( PRINT_ALL, "...not using GL_ARB_multitexture, < 2 texture units\n" );
-					}
-				}
-			}
-			else
-			{
-				ri.Printf( PRINT_ALL, "...ignoring GL_ARB_multitexture\n" );
-			}
-		}
-		else
-		{
-			ri.Printf( PRINT_ALL, "...GL_ARB_multitexture not found\n" );
-		}
-
-		// GL_EXT_compiled_vertex_array
-		if ( SDL_GL_ExtensionSupported( "GL_EXT_compiled_vertex_array" ) )
-		{
-			if ( r_ext_compiled_vertex_array->value )
-			{
-				ri.Printf( PRINT_ALL, "...using GL_EXT_compiled_vertex_array\n" );
-				qglLockArraysEXT = ( void ( APIENTRY * )( GLint, GLint ) ) SDL_GL_GetProcAddress( "glLockArraysEXT" );
-				qglUnlockArraysEXT = ( void ( APIENTRY * )( void ) ) SDL_GL_GetProcAddress( "glUnlockArraysEXT" );
-				if (!qglLockArraysEXT || !qglUnlockArraysEXT)
-				{
-					ri.Error (ERR_FATAL, "bad getprocaddress");
-				}
-			}
-			else
-			{
-				ri.Printf( PRINT_ALL, "...ignoring GL_EXT_compiled_vertex_array\n" );
-			}
-		}
-		else
-		{
-			ri.Printf( PRINT_ALL, "...GL_EXT_compiled_vertex_array not found\n" );
-		}
-	}
-
 	textureFilterAnisotropic = qfalse;
-	if ( SDL_GL_ExtensionSupported( "GL_EXT_texture_filter_anisotropic" ) )
+	if ( GLimp_ExtensionSupported( "GL_EXT_texture_filter_anisotropic" ) )
 	{
 		if ( r_ext_texture_filter_anisotropic->integer ) {
 			qglGetIntegerv( GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, (GLint *)&maxAnisotropy );
@@ -1092,16 +948,9 @@ static void GLimp_InitExtensions( qboolean fixedFunction )
 		ri.Printf( PRINT_ALL, "...GL_EXT_texture_filter_anisotropic not found\n" );
 	}
 
-	haveClampToEdge = qfalse;
-	if ( QGL_VERSION_ATLEAST( 1, 2 ) || QGLES_VERSION_ATLEAST( 1, 0 ) || SDL_GL_ExtensionSupported( "GL_SGIS_texture_edge_clamp" ) )
-	{
-		ri.Printf( PRINT_ALL, "...using GL_SGIS_texture_edge_clamp\n" );
-		haveClampToEdge = qtrue;
-	}
-	else
-	{
-		ri.Printf( PRINT_ALL, "...GL_SGIS_texture_edge_clamp not found\n" );
-	}
+	// Edge-clamp sampling is always available on GLES (core since GLES 1.0/2.0).
+	haveClampToEdge = qtrue;
+	ri.Printf( PRINT_ALL, "...using GL_SGIS_texture_edge_clamp (core on GLES)\n" );
 }
 
 #define R_MODE_FALLBACK 3 // 640 * 480
@@ -1118,11 +967,13 @@ void GLimp_Init( qboolean fixedFunction )
 {
 	ri.Printf( PRINT_DEVELOPER, "Glimp_Init( )\n" );
 
-	r_allowSoftwareGL = ri.Cvar_Get( "r_allowSoftwareGL", "0", CVAR_LATCH );
+	if ( fixedFunction ) {
+		Com_Error( ERR_FATAL, "The Metal renderer does not support the fixed-function pipeline" );
+	}
+
 	r_sdlDriver = ri.Cvar_Get( "r_sdlDriver", "", CVAR_ROM );
 	r_allowResize = ri.Cvar_Get( "r_allowResize", "0", CVAR_ARCHIVE | CVAR_LATCH );
 	r_centerWindow = ri.Cvar_Get( "r_centerWindow", "0", CVAR_ARCHIVE | CVAR_LATCH );
-	r_preferOpenGLES = ri.Cvar_Get( "r_preferOpenGLES", "-1", CVAR_ARCHIVE | CVAR_LATCH );
 
 	if( ri.Cvar_VariableIntegerValue( "com_abnormalExit" ) )
 	{
@@ -1135,13 +986,13 @@ void GLimp_Init( qboolean fixedFunction )
 	ri.Sys_GLimpInit( );
 
 	// Create the window and set up the context
-	if(GLimp_StartDriverAndSetMode(r_mode->integer, r_fullscreen->integer, r_noborder->integer, fixedFunction))
+	if(GLimp_StartDriverAndSetMode(r_mode->integer, r_fullscreen->integer, r_noborder->integer))
 		goto success;
 
 	// Try again, this time in a platform specific "safe mode"
 	ri.Sys_GLimpSafeInit( );
 
-	if(GLimp_StartDriverAndSetMode(r_mode->integer, r_fullscreen->integer, qfalse, fixedFunction))
+	if(GLimp_StartDriverAndSetMode(r_mode->integer, r_fullscreen->integer, qfalse))
 		goto success;
 
 	// Finally, try the default screen resolution
@@ -1150,12 +1001,12 @@ void GLimp_Init( qboolean fixedFunction )
 		ri.Printf( PRINT_ALL, "Setting r_mode %d failed, falling back on r_mode %d\n",
 				r_mode->integer, R_MODE_FALLBACK );
 
-		if(GLimp_StartDriverAndSetMode(R_MODE_FALLBACK, qfalse, qfalse, fixedFunction))
+		if(GLimp_StartDriverAndSetMode(R_MODE_FALLBACK, qfalse, qfalse))
 			goto success;
 	}
 
 	// Nothing worked, give up
-	ri.Error( ERR_FATAL, "GLimp_Init() - could not load OpenGL subsystem" );
+	ri.Error( ERR_FATAL, "GLimp_Init() - could not load Metal (ANGLE) subsystem" );
 
 success:
 	// These values force the UI to disable driver selection
@@ -1173,7 +1024,7 @@ success:
 		glConfig.renderer_string[strlen(glConfig.renderer_string) - 1] = 0;
 	Q_strncpyz( glConfig.version_string, (char *) qglGetString (GL_VERSION), sizeof( glConfig.version_string ) );
 
-	// manually create extension list if using OpenGL 3
+	// manually create extension list, same as a GL3+ core context
 	if ( qglGetStringi )
 	{
 		int i, numExtensions, extensionLength, listLength;
@@ -1205,14 +1056,13 @@ success:
 	}
 
 	// initialize extensions
-	GLimp_InitExtensions( fixedFunction );
+	GLimp_InitExtensions();
 
 	ri.Cvar_Get( "r_availableModes", "", CVAR_ROM );
 
 	// This depends on SDL_INIT_VIDEO, hence having it here
 	ri.IN_Init( SDL_window );
 }
-
 
 /*
 ===============
@@ -1226,7 +1076,7 @@ void GLimp_EndFrame( void )
 	// don't flip if drawing to front buffer
 	if ( Q_stricmp( r_drawBuffer->string, "GL_FRONT" ) != 0 )
 	{
-		SDL_GL_SwapWindow( SDL_window );
+		eglSwapBuffers( eglDisplay, eglSurface );
 	}
 
 	if( r_fullscreen->modified )
@@ -1250,10 +1100,6 @@ void GLimp_EndFrame( void )
 
 		if( needToToggle )
 		{
-			// SDL_SetWindowFullscreen takes actual SDL_WindowFlags, not a boolean -
-			// passing r_fullscreen->integer (0 or 1) directly happened to alias onto
-			// SDL_WINDOW_FULLSCREEN (exclusive mode switch, unreliable on macOS) by
-			// numeric coincidence. Map it explicitly to the desktop-resolution variant.
 			sdlToggled = SDL_SetWindowFullscreen( SDL_window,
 				r_fullscreen->integer ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0 ) >= 0;
 

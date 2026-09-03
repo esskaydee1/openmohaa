@@ -47,3 +47,42 @@ out
 # Flex and Bison
 ####################
 /code/parser/generated
+
+# Local game install + copyrighted/third-party content
+# (not part of the OpenMoHAA source tree - never commit these)
+####################
+/main/
+/mainta/
+/maintt/
+/lib/
+/include/
+/openmohaa.app/
+/omohaaded
+/launch_openmohaa_*
+/renderer_opengl*.dylib
+/renderer_metal.dylib
+/cgame.dylib
+/game.dylib
+
+# Vendored ANGLE build (Metal backend for renderer_metal): the dylibs are a
+# multi-hundred-MB local build output, not something to commit. Headers are
+# small/text and stay tracked so the renderer_metal source is self-contained.
+/code/thirdparty/libs/macos/angle/*.dylib
+/gog-download/
+/community-mods/
+/blurred-rememberance/
+/complete-remaster/
+/fan-mods/
+/kriegs-europa/
+/warchest-restored/
+
+# Loose files from the retail installer sitting at repo root
+/*.dll
+/*.ico
+/*.bat
+/*.exe
+/00000000.*
+/Readme*.txt
+/PatchReadme*.txt
+/snddrivers/
+/sm.0*

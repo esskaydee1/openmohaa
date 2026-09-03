@@ -62,7 +62,7 @@ void GLimp_InitExtraExtensions(void)
 #undef GLE
 
 	// GL function loader, based on https://gist.github.com/rygorous/16796a0c876cf8a5f542caddb55bce8a
-#define GLE(ret, name, ...) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name);
+#define GLE(ret, name, ...) qgl##name = (name##proc *) GLimp_GetProcAddress("gl" #name);
 
 	//
 	// OpenGL ES extensions
@@ -73,7 +73,7 @@ void GLimp_InitExtraExtensions(void)
 			goto done;
 
 		extension = "GL_EXT_occlusion_query_boolean";
-		if (qglesMajorVersion >= 3 || SDL_GL_ExtensionSupported(extension))
+		if (qglesMajorVersion >= 3 || GLimp_ExtensionSupported(extension))
 		{
 			glRefConfig.occlusionQuery = qtrue;
 			glRefConfig.occlusionQueryTarget = GL_ANY_SAMPLES_PASSED;
@@ -83,12 +83,12 @@ void GLimp_InitExtraExtensions(void)
 			} else {
 				// GL_EXT_occlusion_query_boolean uses EXT suffix
 #undef GLE
-#define GLE(ret, name, ...) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name "EXT");
+#define GLE(ret, name, ...) qgl##name = (name##proc *) GLimp_GetProcAddress("gl" #name "EXT");
 
 				QGL_ARB_occlusion_query_PROCS;
 
 #undef GLE
-#define GLE(ret, name, ...) qgl##name = (name##proc *) SDL_GL_GetProcAddress("gl" #name);
+#define GLE(ret, name, ...) qgl##name = (name##proc *) GLimp_GetProcAddress("gl" #name);
 			}
 
 			ri.Printf(PRINT_ALL, result[glRefConfig.occlusionQuery], extension);
@@ -100,7 +100,7 @@ void GLimp_InitExtraExtensions(void)
 
 		// GL_NV_read_depth
 		extension = "GL_NV_read_depth";
-		if (SDL_GL_ExtensionSupported(extension))
+		if (GLimp_ExtensionSupported(extension))
 		{
 			glRefConfig.readDepth = qtrue;
 			ri.Printf(PRINT_ALL, result[glRefConfig.readDepth], extension);
@@ -112,7 +112,7 @@ void GLimp_InitExtraExtensions(void)
 
 		// GL_NV_read_stencil
 		extension = "GL_NV_read_stencil";
-		if (SDL_GL_ExtensionSupported(extension))
+		if (GLimp_ExtensionSupported(extension))
 		{
 			glRefConfig.readStencil = qtrue;
 			ri.Printf(PRINT_ALL, result[glRefConfig.readStencil], extension);
@@ -124,7 +124,7 @@ void GLimp_InitExtraExtensions(void)
 
 		// GL_EXT_shadow_samplers
 		extension = "GL_EXT_shadow_samplers";
-		if (qglesMajorVersion >= 3 || SDL_GL_ExtensionSupported(extension))
+		if (qglesMajorVersion >= 3 || GLimp_ExtensionSupported(extension))
 		{
 			glRefConfig.shadowSamplers = qtrue;
 			ri.Printf(PRINT_ALL, result[glRefConfig.shadowSamplers], extension);
@@ -136,7 +136,7 @@ void GLimp_InitExtraExtensions(void)
 
 		// GL_OES_standard_derivatives
 		extension = "GL_OES_standard_derivatives";
-		if (qglesMajorVersion >= 3 || SDL_GL_ExtensionSupported(extension))
+		if (qglesMajorVersion >= 3 || GLimp_ExtensionSupported(extension))
 		{
 			glRefConfig.standardDerivatives = qtrue;
 			ri.Printf(PRINT_ALL, result[glRefConfig.standardDerivatives], extension);
@@ -148,7 +148,7 @@ void GLimp_InitExtraExtensions(void)
 
 		// GL_OES_element_index_uint
 		extension = "GL_OES_element_index_uint";
-		if (qglesMajorVersion >= 3 || SDL_GL_ExtensionSupported(extension))
+		if (qglesMajorVersion >= 3 || GLimp_ExtensionSupported(extension))
 		{
 			glRefConfig.vaoCacheGlIndexType = GL_UNSIGNED_INT;
 			glRefConfig.vaoCacheGlIndexSize = sizeof(unsigned int);
@@ -157,6 +157,32 @@ void GLimp_InitExtraExtensions(void)
 		else
 		{
 			ri.Printf(PRINT_ALL, result[2], extension);
+		}
+
+		// Framebuffer objects and vertex array objects are core, unextended
+		// entry points on OpenGL ES 3.0+ (unlike desktop GL, where they only
+		// became core in 3.0 and were an ARB extension before that) - the
+		// desktop-only resolution below never runs for an ES context, so
+		// resolve them here instead.
+		if (qglesMajorVersion >= 3)
+		{
+			glRefConfig.framebufferObject = qtrue;
+			glRefConfig.framebufferBlit = qtrue;
+			glRefConfig.framebufferMultisample = qtrue;
+
+			qglGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &glRefConfig.maxRenderbufferSize);
+			qglGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &glRefConfig.maxColorAttachments);
+
+			QGL_ARB_framebuffer_object_PROCS;
+
+			ri.Printf(PRINT_ALL, result[1], "GL_ARB_framebuffer_object (core in GLES3)");
+
+			// Core context requires VAO, same as desktop GL 3.0+.
+			glRefConfig.vertexArrayObject = qtrue;
+
+			QGL_ARB_vertex_array_object_PROCS;
+
+			ri.Printf(PRINT_ALL, result[1], "GL_ARB_vertex_array_object (core in GLES3)");
 		}
 
 		goto done;
@@ -172,7 +198,7 @@ void GLimp_InitExtraExtensions(void)
 	glRefConfig.framebufferObject = qfalse;
 	glRefConfig.framebufferBlit = qfalse;
 	glRefConfig.framebufferMultisample = qfalse;
-	if (q_gl_version_at_least_3_0 || SDL_GL_ExtensionSupported(extension))
+	if (q_gl_version_at_least_3_0 || GLimp_ExtensionSupported(extension))
 	{
 		glRefConfig.framebufferObject = !!r_ext_framebuffer_object->integer;
 		glRefConfig.framebufferBlit = qtrue;
@@ -193,7 +219,7 @@ void GLimp_InitExtraExtensions(void)
 	// OpenGL 3.0 - GL_ARB_vertex_array_object
 	extension = "GL_ARB_vertex_array_object";
 	glRefConfig.vertexArrayObject = qfalse;
-	if (q_gl_version_at_least_3_0 || SDL_GL_ExtensionSupported(extension))
+	if (q_gl_version_at_least_3_0 || GLimp_ExtensionSupported(extension))
 	{
 		if (q_gl_version_at_least_3_0)
 		{
@@ -217,7 +243,7 @@ void GLimp_InitExtraExtensions(void)
 	// OpenGL 3.0 - GL_ARB_texture_float
 	extension = "GL_ARB_texture_float";
 	glRefConfig.textureFloat = qfalse;
-	if (q_gl_version_at_least_3_0 || SDL_GL_ExtensionSupported(extension))
+	if (q_gl_version_at_least_3_0 || GLimp_ExtensionSupported(extension))
 	{
 		glRefConfig.textureFloat = !!r_ext_texture_float->integer;
 
@@ -231,7 +257,7 @@ void GLimp_InitExtraExtensions(void)
 	// OpenGL 3.2 - GL_ARB_depth_clamp
 	extension = "GL_ARB_depth_clamp";
 	glRefConfig.depthClamp = qfalse;
-	if (q_gl_version_at_least_3_2 || SDL_GL_ExtensionSupported(extension))
+	if (q_gl_version_at_least_3_2 || GLimp_ExtensionSupported(extension))
 	{
 		glRefConfig.depthClamp = qtrue;
 
@@ -245,7 +271,7 @@ void GLimp_InitExtraExtensions(void)
 	// OpenGL 3.2 - GL_ARB_seamless_cube_map
 	extension = "GL_ARB_seamless_cube_map";
 	glRefConfig.seamlessCubeMap = qfalse;
-	if (q_gl_version_at_least_3_2 || SDL_GL_ExtensionSupported(extension))
+	if (q_gl_version_at_least_3_2 || GLimp_ExtensionSupported(extension))
 	{
 		glRefConfig.seamlessCubeMap = !!r_arb_seamless_cube_map->integer;
 
@@ -260,7 +286,7 @@ void GLimp_InitExtraExtensions(void)
 
 	// GL_NVX_gpu_memory_info
 	extension = "GL_NVX_gpu_memory_info";
-	if( SDL_GL_ExtensionSupported( extension ) )
+	if( GLimp_ExtensionSupported( extension ) )
 	{
 		glRefConfig.memInfo = MI_NVX;
 
@@ -273,7 +299,7 @@ void GLimp_InitExtraExtensions(void)
 
 	// GL_ATI_meminfo
 	extension = "GL_ATI_meminfo";
-	if( SDL_GL_ExtensionSupported( extension ) )
+	if( GLimp_ExtensionSupported( extension ) )
 	{
 		if (glRefConfig.memInfo == MI_NONE)
 		{
@@ -295,7 +321,7 @@ void GLimp_InitExtraExtensions(void)
 
 	// GL_ARB_texture_compression_rgtc
 	extension = "GL_ARB_texture_compression_rgtc";
-	if (SDL_GL_ExtensionSupported(extension))
+	if (GLimp_ExtensionSupported(extension))
 	{
 		qboolean useRgtc = r_ext_compressed_textures->integer >= 1;
 
@@ -313,7 +339,7 @@ void GLimp_InitExtraExtensions(void)
 
 	// GL_ARB_texture_compression_bptc
 	extension = "GL_ARB_texture_compression_bptc";
-	if (SDL_GL_ExtensionSupported(extension))
+	if (GLimp_ExtensionSupported(extension))
 	{
 		qboolean useBptc = r_ext_compressed_textures->integer >= 2;
 
@@ -330,7 +356,7 @@ void GLimp_InitExtraExtensions(void)
 	// GL_EXT_direct_state_access
 	extension = "GL_EXT_direct_state_access";
 	glRefConfig.directStateAccess = qfalse;
-	if (SDL_GL_ExtensionSupported(extension))
+	if (GLimp_ExtensionSupported(extension))
 	{
 		glRefConfig.directStateAccess = !!r_ext_direct_state_access->integer;
 

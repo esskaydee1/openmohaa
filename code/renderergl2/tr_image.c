@@ -2247,6 +2247,17 @@ image_t *R_CreateImage2( const char *name, byte *pic, int width, int height, GLe
 				dataFormat = GL_RGBA;
 				dataType = GL_UNSIGNED_SHORT_4_4_4_4;
 				break;
+			case GL_DEPTH_COMPONENT:
+			case GL_DEPTH_COMPONENT16_ARB:
+			case GL_DEPTH_COMPONENT24_ARB:
+			case GL_DEPTH_COMPONENT32_ARB:
+				// Depth sized formats are already valid GLES3 texture
+				// internal formats as-is (unlike the color formats above,
+				// which need remapping to their ES2-era unsized form); only
+				// the upload type needs to change from the color default.
+				dataFormat = GL_DEPTH_COMPONENT;
+				dataType = GL_UNSIGNED_INT;
+				break;
 			default:
 				ri.Error( ERR_DROP, "Missing OpenGL ES support for image '%s' with internal format 0x%X\n", name, internalFormat );
 		}

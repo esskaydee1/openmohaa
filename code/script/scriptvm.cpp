@@ -642,7 +642,7 @@ bool ScriptVM::executeGetter(Listener *listener, op_evName_t eventName)
     return false;
 }
 
-bool ScriptVM::executeSetter(Listener *listener, op_evName_t eventName)
+__attribute__((optnone)) bool ScriptVM::executeSetter(Listener *listener, op_evName_t eventName)
 {
     int eventNum = Event::FindSetterEventNum(eventName);
 

@@ -342,4 +342,13 @@ extern int qglesMajorVersion, qglesMinorVersion;
 #define QGL_VERSION_ATLEAST( major, minor ) ( qglMajorVersion > major || ( qglMajorVersion == major && qglMinorVersion >= minor ) )
 #define QGLES_VERSION_ATLEAST( major, minor ) ( qglesMajorVersion > major || ( qglesMajorVersion == major && qglesMinorVersion >= minor ) )
 
+// Backends that don't create their context through SDL_GL_CreateContext (e.g. the
+// Metal backend, which drives ANGLE directly through EGL) can't service
+// SDL_GL_GetProcAddress/SDL_GL_ExtensionSupported, since those require SDL's own
+// GL context tracking. Renderer code that needs to resolve a proc or check an
+// extension outside of GLimp_Init's own setup should go through these instead;
+// each sdl_*imp.c backend provides its own implementation.
+void *GLimp_GetProcAddress( const char *name );
+qboolean GLimp_ExtensionSupported( const char *extension );
+
 #endif

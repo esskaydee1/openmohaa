@@ -212,6 +212,182 @@ typedef enum DXGI_FORMAT {
                          (((ui32_t)((x)[2])) << 16) | \
                          (((ui32_t)((x)[3])) << 24) )
 
+/*
+===========================================================================
+S3TC (BC1/BC2/BC3) software decompression
+
+ANGLE's Metal backend never exposes GL_EXT_texture_compression_s3tc (Apple
+Silicon GPUs don't support BC/DXT texture formats in Metal at all), but some
+installed content ships textures only as pre-compressed DDS files with no
+uncompressed fallback. R_LoadDDS decompresses those to plain RGBA8 below
+when the active context can't accept the compressed format directly, so
+GLES/Metal ends up in exactly the same place a desktop GL2 build would when
+r_ext_compressed_textures is off. Only the mip-0 block data is unpacked;
+the RGBA8 path already auto-generates the remaining mip chain.
+===========================================================================
+*/
+
+static void DecodeBC1Block( const byte *block, byte out[4][4][4] )
+{
+	int c0raw = block[0] | ( block[1] << 8 );
+	int c1raw = block[2] | ( block[3] << 8 );
+	ui32_t indices = (ui32_t)block[4] | ( (ui32_t)block[5] << 8 ) | ( (ui32_t)block[6] << 16 ) | ( (ui32_t)block[7] << 24 );
+	byte colors[4][4]; // [index][r,g,b,a]
+	int i, px, py;
+
+	colors[0][0] = (byte)( ( ( c0raw >> 11 ) & 0x1F ) * 255 / 31 );
+	colors[0][1] = (byte)( ( ( c0raw >> 5 ) & 0x3F ) * 255 / 63 );
+	colors[0][2] = (byte)( ( c0raw & 0x1F ) * 255 / 31 );
+	colors[0][3] = 255;
+
+	colors[1][0] = (byte)( ( ( c1raw >> 11 ) & 0x1F ) * 255 / 31 );
+	colors[1][1] = (byte)( ( ( c1raw >> 5 ) & 0x3F ) * 255 / 63 );
+	colors[1][2] = (byte)( ( c1raw & 0x1F ) * 255 / 31 );
+	colors[1][3] = 255;
+
+	if ( c0raw > c1raw )
+	{
+		for ( i = 0; i < 3; i++ )
+		{
+			colors[2][i] = (byte)( ( 2 * colors[0][i] + colors[1][i] ) / 3 );
+			colors[3][i] = (byte)( ( colors[0][i] + 2 * colors[1][i] ) / 3 );
+		}
+		colors[2][3] = 255;
+		colors[3][3] = 255;
+	}
+	else
+	{
+		for ( i = 0; i < 3; i++ )
+		{
+			colors[2][i] = (byte)( ( colors[0][i] + colors[1][i] ) / 2 );
+			colors[3][i] = 0;
+		}
+		colors[2][3] = 255;
+		colors[3][3] = 0;
+	}
+
+	for ( py = 0; py < 4; py++ )
+	{
+		for ( px = 0; px < 4; px++ )
+		{
+			int idx = ( indices >> ( 2 * ( py * 4 + px ) ) ) & 0x3;
+			out[py][px][0] = colors[idx][0];
+			out[py][px][1] = colors[idx][1];
+			out[py][px][2] = colors[idx][2];
+			out[py][px][3] = colors[idx][3];
+		}
+	}
+}
+
+static void DecodeBC3AlphaBlock( const byte *block, byte outAlpha[4][4] )
+{
+	byte a0 = block[0];
+	byte a1 = block[1];
+	ui32_t bitsLow = (ui32_t)block[2] | ( (ui32_t)block[3] << 8 ) | ( (ui32_t)block[4] << 16 );
+	ui32_t bitsHigh = (ui32_t)block[5] | ( (ui32_t)block[6] << 8 ) | ( (ui32_t)block[7] << 16 );
+	byte alphas[8];
+	int i, px, py;
+
+	alphas[0] = a0;
+	alphas[1] = a1;
+	if ( a0 > a1 )
+	{
+		for ( i = 1; i <= 6; i++ )
+			alphas[1 + i] = (byte)( ( ( 7 - i ) * a0 + i * a1 ) / 7 );
+	}
+	else
+	{
+		for ( i = 1; i <= 4; i++ )
+			alphas[1 + i] = (byte)( ( ( 5 - i ) * a0 + i * a1 ) / 5 );
+		alphas[6] = 0;
+		alphas[7] = 255;
+	}
+
+	for ( py = 0; py < 4; py++ )
+	{
+		for ( px = 0; px < 4; px++ )
+		{
+			int pixelIndex = py * 4 + px;
+			ui32_t bits = pixelIndex < 8 ? bitsLow : bitsHigh;
+			int shift = ( pixelIndex % 8 ) * 3;
+			int idx = ( bits >> shift ) & 0x7;
+			outAlpha[py][px] = alphas[idx];
+		}
+	}
+}
+
+static byte *DecompressS3TC( const byte *data, int width, int height, GLenum format )
+{
+	int blocksWide = ( width + 3 ) / 4;
+	int blocksHigh = ( height + 3 ) / 4;
+	qboolean isDxt1 = ( format != GL_COMPRESSED_RGBA_S3TC_DXT3_EXT && format != GL_COMPRESSED_RGBA_S3TC_DXT5_EXT );
+	int blockSize = isDxt1 ? 8 : 16;
+	byte *out = ri.Malloc( width * height * 4 );
+	int bx, by;
+
+	for ( by = 0; by < blocksHigh; by++ )
+	{
+		for ( bx = 0; bx < blocksWide; bx++ )
+		{
+			const byte *block = data + ( (size_t)( by * blocksWide + bx ) ) * blockSize;
+			byte colorBlock[4][4][4];
+			byte alphaBlock[4][4];
+			qboolean hasExplicitAlpha = qfalse;
+			int px, py;
+
+			if ( format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT )
+			{
+				DecodeBC3AlphaBlock( block, alphaBlock );
+				DecodeBC1Block( block + 8, colorBlock );
+				hasExplicitAlpha = qtrue;
+			}
+			else if ( format == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT )
+			{
+				for ( py = 0; py < 4; py++ )
+				{
+					for ( px = 0; px < 4; px++ )
+					{
+						int pixelIndex = py * 4 + px;
+						byte nibble = ( block[pixelIndex / 2] >> ( ( pixelIndex % 2 ) * 4 ) ) & 0xF;
+						alphaBlock[py][px] = (byte)( nibble * 17 ); // 0..15 -> 0..255
+					}
+				}
+				DecodeBC1Block( block + 8, colorBlock );
+				hasExplicitAlpha = qtrue;
+			}
+			else
+			{
+				// DXT1: punch-through alpha (if any) is already baked into
+				// colorBlock[..][3] by DecodeBC1Block.
+				DecodeBC1Block( block, colorBlock );
+			}
+
+			for ( py = 0; py < 4; py++ )
+			{
+				int y = by * 4 + py;
+				if ( y >= height )
+					continue;
+
+				for ( px = 0; px < 4; px++ )
+				{
+					int x = bx * 4 + px;
+					byte *dst;
+
+					if ( x >= width )
+						continue;
+
+					dst = out + ( (size_t)y * width + x ) * 4;
+					dst[0] = colorBlock[py][px][0];
+					dst[1] = colorBlock[py][px][1];
+					dst[2] = colorBlock[py][px][2];
+					dst[3] = hasExplicitAlpha ? alphaBlock[py][px] : colorBlock[py][px][3];
+				}
+			}
+		}
+	}
+
+	return out;
+}
 
 void R_LoadDDS ( const char *filename, byte **pic, int *width, int *height, GLenum *picFormat, int *numMips )
 {
@@ -450,6 +626,23 @@ void R_LoadDDS ( const char *filename, byte **pic, int *width, int *height, GLen
 	Com_Memcpy(*pic, data, len);
 
 	ri.FS_FreeFile(buffer.v);
+
+	// Under GLES with no S3TC support (ANGLE/Metal on Apple Silicon), decompress
+	// mip 0 to RGBA8 in software rather than handing the GPU a compressed
+	// format it can't accept. Any additional pre-baked compressed mips are
+	// discarded; RawImage's normal RGBA8 path auto-generates the rest.
+	if ( qglesMajorVersion && glConfig.textureCompression == TC_NONE &&
+		( *picFormat == GL_COMPRESSED_RGB_S3TC_DXT1_EXT ||
+		  *picFormat == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT ||
+		  *picFormat == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT ) )
+	{
+		byte *decompressed = DecompressS3TC( *pic, *width, *height, *picFormat );
+		ri.Free( *pic );
+		*pic = decompressed;
+		*picFormat = GL_RGBA8;
+		if ( numMips )
+			*numMips = 1;
+	}
 }
 
 void R_SaveDDS(const char *filename, byte *pic, int width, int height, int depth)

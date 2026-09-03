@@ -18,6 +18,11 @@ set(SDL_RENDERER_SOURCES
     ${SOURCE_DIR}/sdl/sdl_glimp.c
 )
 
+set(SDL_METAL_RENDERER_SOURCES
+    ${SOURCE_DIR}/sdl/sdl_gamma.c
+    ${SOURCE_DIR}/sdl/sdl_metalimp.c
+)
+
 set(DYNAMIC_RENDERER_SOURCES
     ${SOURCE_DIR}/renderercommon/tr_subs.c
     ${SOURCE_DIR}/qcommon/q_shared.c

@@ -4627,7 +4627,11 @@ void Listener::ExecuteScriptInternal(Event *ev, ScriptVariable& returnValue)
 {
     ScriptThread *thread = CreateScriptInternal(ev->GetValue(1));
 
-    thread->ScriptExecute(&ev->data[1], ev->dataSize - 1, returnValue);
+    try {
+        thread->ScriptExecute(&ev->data[1], ev->dataSize - 1, returnValue);
+    } catch (ScriptException& exc) {
+        EVENT_DPrintf("Listener::ExecuteScriptInternal: %s\n", exc.string.c_str());
+    }
 }
 
 /*
@@ -4639,7 +4643,11 @@ void Listener::ExecuteThreadInternal(Event *ev, ScriptVariable& returnValue)
 {
     ScriptThread *thread = CreateThreadInternal(ev->GetValue(1));
 
-    thread->ScriptExecute(&ev->data[1], ev->dataSize - 1, returnValue);
+    try {
+        thread->ScriptExecute(&ev->data[1], ev->dataSize - 1, returnValue);
+    } catch (ScriptException& exc) {
+        EVENT_DPrintf("Listener::ExecuteThreadInternal: %s\n", exc.string.c_str());
+    }
 }
 
 /*
@@ -4654,7 +4662,11 @@ void Listener::WaitExecuteScriptInternal(Event *ev, ScriptVariable& returnValue)
 
     thread->GetScriptClass()->Register(0, currentThread);
 
-    thread->ScriptExecute(&ev->data[1], ev->dataSize - 1, returnValue);
+    try {
+        thread->ScriptExecute(&ev->data[1], ev->dataSize - 1, returnValue);
+    } catch (ScriptException& exc) {
+        EVENT_DPrintf("Listener::WaitExecuteScriptInternal: %s\n", exc.string.c_str());
+    }
 }
 
 /*
@@ -4669,7 +4681,11 @@ void Listener::WaitExecuteThreadInternal(Event *ev, ScriptVariable& returnValue)
 
     thread->Register(0, currentThread);
 
-    thread->ScriptExecute(&ev->data[1], ev->dataSize - 1, returnValue);
+    try {
+        thread->ScriptExecute(&ev->data[1], ev->dataSize - 1, returnValue);
+    } catch (ScriptException& exc) {
+        EVENT_DPrintf("Listener::WaitExecuteThreadInternal: %s\n", exc.string.c_str());
+    }
 }
 
 /*
