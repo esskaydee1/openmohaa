@@ -7,6 +7,7 @@ endif()
 option(BUILD_MACOS_APP "Deploy as a macOS .app" ON)
 
 enable_language(OBJC)
+enable_language(OBJCXX)
 
 list(APPEND SYSTEM_PLATFORM_SOURCES ${SOURCE_DIR}/sys/sys_osx.m)
 
@@ -78,6 +79,11 @@ function(finish_macos_app)
         if(BUILD_RENDERER_METAL)
             set_output_dirs(${RENDERER_METAL_BINARY} SUBDIRECTORY ${MACOS_APP_BINARY_DIR})
             add_dependencies(${CLIENT_BINARY} ${RENDERER_METAL_BINARY})
+        endif()
+
+        if(BUILD_RENDERER_METALRT)
+            set_output_dirs(${RENDERER_METALRT_BINARY} SUBDIRECTORY ${MACOS_APP_BINARY_DIR})
+            add_dependencies(${CLIENT_BINARY} ${RENDERER_METALRT_BINARY})
         endif()
     endif()
 endfunction()

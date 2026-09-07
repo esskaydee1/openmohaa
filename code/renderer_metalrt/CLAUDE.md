@@ -152,6 +152,31 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 1 shipped: `renderer_metalrt` builds and
+  loads via `cl_renderer "metalrt"` (new `cmake/renderer_metalrt.cmake`,
+  `enable_language(OBJCXX)` added to macos.cmake for this - the project's
+  first Objective-C++ file). `GetRefAPI` opens a real SDL Metal window,
+  creates an `MTLDevice`/command queue/`CAMetalLayer` swapchain, and
+  `BeginFrame`/`EndFrame` clear-and-present a solid color every frame -
+  visually confirmed live. All 84 `refexport_t` functions are populated
+  (5 real lifecycle/frame functions in `rt_init.mm`, the other 79 as
+  loud one-time-warn stubs in `rt_stubs.cpp`, never silent per rule 4).
+  Two real crashes found and fixed along the way, both worth remembering
+  for later sessions: (1) `UIFont`'s constructor (`code/uilib/uifont.cpp`)
+  hard-`Sys_Error`s if `LoadFont` returns NULL - can't reach any screen,
+  menu or otherwise, without a font. (2) `UIFont::getCharWidth`/`getHeight`
+  read a `fontheader_t`'s `sgl[]`/`charTable` internals *directly*,
+  bypassing `GetFontStringWidth`/`GetFontHeight`/`DrawString` entirely -
+  so even a non-NULL empty font struct segfaults on `sgl[0]->indirection[ch]`
+  the first time any UI text measures itself (unavoidable during startup,
+  `View3D::InitSubtitle`). `RT_LoadFont`'s stub now returns a font with
+  one real (if glyph-empty) `sgl` page to satisfy this until real font
+  loading exists. Also: show the window only after the layer's device/
+  pixelFormat/drawableSize are set, not before. Next: pick one real
+  `refexport_t` function (or start the window/device teardown-and-recreate
+  path for `vid_restart`, which session 1 doesn't handle at all yet) as
+  Phase 1, session 2.
+
 - 2026-09-07: Planning docs (ROADMAP/ARCHITECTURE/CLAUDE) fact-checked
   against the real codebase (7 parallel verification passes) and against
   current Metal ray-tracing API reality. Corrected: refexport_t is 84
