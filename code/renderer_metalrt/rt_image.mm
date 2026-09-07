@@ -87,7 +87,22 @@ void RT_MapLocalToScreen( float lx, float ly, float *outX, float *outY )
 	float fracX = ( rangeX != 0.0f ) ? ( lx - rt2DWindow.left ) / rangeX : 0.0f;
 	float fracY = ( rangeY != 0.0f ) ? ( ly - rt2DWindow.top ) / rangeY : 0.0f;
 	*outX = rt2DWindow.vx + fracX * rt2DWindow.vw;
-	*outY = rt2DWindow.vy + fracY * rt2DWindow.vh;
+
+	// rt2DWindow.vy follows OpenGL's bottom-up glViewport convention, not
+	// Metal's top-down one - UIWidget::set2D (code/uilib/uiwidget.cpp)
+	// computes it as "vidHeight - (widget's local bottom edge)" because
+	// that's what a real qglViewport call needs, and Set2DWindow's ABI
+	// carries that straight through unchanged. Using vy directly as if
+	// it were already a top-down screen Y (session 5's original bug)
+	// only LOOKED correct for widgets that span nearly the full window
+	// height (vy≈0) or for symmetric pairs compared only against each
+	// other (the pause menu's two buttons, both wrong by the same
+	// amount, so their relative spread still looked "fixed") - it was
+	// never actually right. The true top-down top edge of the viewport
+	// is vidHeight - (vy + vh); convert once here, then apply the
+	// fraction the same way X does.
+	float metalTopY = (float)rtGlConfig.vidHeight - ( rt2DWindow.vy + rt2DWindow.vh );
+	*outY = metalTopY + fracY * rt2DWindow.vh;
 }
 
 const char *rtShaderSource2D =
@@ -452,11 +467,18 @@ static void RT_Scissor( int x, int y, int width, int height )
 	if ( encoder == nil )
 		return;
 
+	// y follows the same OpenGL bottom-up glScissor convention as
+	// Set2DWindow's vy (UIWidget::set2D computes both from the same
+	// "vidHeight - (rect's local bottom edge)" formula) - convert to
+	// Metal's top-down scissor-rect Y the same way RT_MapLocalToScreen
+	// does, rather than using y directly.
+	int metalTopY = rtGlConfig.vidHeight - ( y + height );
+
 	// Metal asserts if a scissor rect extends past the render target -
 	// clamp rather than let a widget's clip rect (computed against the
 	// engine's own vidWidth/vidHeight) crash on a rounding edge case.
 	int clampedX = ( x < 0 ) ? 0 : ( x > rtGlConfig.vidWidth ? rtGlConfig.vidWidth : x );
-	int clampedY = ( y < 0 ) ? 0 : ( y > rtGlConfig.vidHeight ? rtGlConfig.vidHeight : y );
+	int clampedY = ( metalTopY < 0 ) ? 0 : ( metalTopY > rtGlConfig.vidHeight ? rtGlConfig.vidHeight : metalTopY );
 	int maxW = rtGlConfig.vidWidth - clampedX;
 	int maxH = rtGlConfig.vidHeight - clampedY;
 	int clampedW = ( width < 0 ) ? 0 : ( width > maxW ? maxW : width );

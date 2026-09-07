@@ -152,6 +152,54 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 9 shipped: fixed a real, previously
+  undetected Y-axis bug in session 5's `Set2DWindow`/`Scissor` fix. Root
+  cause: `UIWidget::set2D()` (`code/uilib/uiwidget.cpp`) computes its Y
+  parameter for BOTH `Rend_Set2D`/`Rend_Scissor` as `vidHeight - (widget's
+  local bottom edge)` - a real `qglViewport`/`qglScissor` call needs that
+  (OpenGL's viewport origin is bottom-left), but Metal's viewport/pixel Y
+  is top-down. `RT_MapLocalToScreen`/`RT_Scissor` (`rt_image.mm`) were
+  using that value directly as if it were already a top-down screen Y,
+  which is a different, generally-wrong value - the true top-down top
+  edge is `vidHeight - (vy + vh)`, not `vy` itself. This silently escaped
+  every session-5/6/7/8 visual check because the error is invisible for
+  widgets that span nearly the full window height (`vy≈0`, e.g. the
+  `main_a`/`main_b` background) or for symmetric pairs only ever compared
+  against each other (the pause menu's "Back to Game"/"Quit" - both were
+  wrong by the identical amount, so their left/right spread still looked
+  "fixed," even though both were actually rendering near the TOP of the
+  screen instead of the bottom where the `.urc` places them, y=448 of
+  480). Found by chasing the user's live report of the *actual* main
+  menu (`ui/main.urc`, richer than the 2-button pause menu ever
+  exercised) looking "garbled, objects improperly placed" - root-caused
+  with a temporary diagnostic (logging every `DrawStretchPic` call's
+  resolved screen rect against its image name, `rt_image.mm`, removed
+  before committing) cross-referenced directly against `main.urc`'s real
+  widget rects extracted from the retail PK3s: `bigmap` ("new game old"
+  button, `.urc` rect 139,89,192,160) was landing 237px too low on
+  screen - `237 ≈ 800 - 2×148.3 - 266.7`, i.e. exactly the gap between
+  "vy used directly" and "vy correctly converted," which conclusively
+  distinguished a coordinate bug from a design-intentional overlap with
+  the neighboring `war_records` button. Fixed in both
+  `RT_MapLocalToScreen` (2D image/text draws) and `RT_Scissor` (clip
+  rects) - both take the same GL-bottom-up Y from the same
+  `UIWidget::set2D` call, so both needed the identical conversion.
+  Visually confirmed live by the user on the real main menu (previously
+  showed a garbled/duplicate-looking overlap; now clean) and by the
+  author (the pause menu's "Quit" button now correctly sits near the
+  bottom-right, matching its `.urc` position, instead of the top-right
+  it incorrectly rendered at since session 5). No regression on 3D
+  world/entity rendering (unaffected code path) or the previously-fixed
+  simple pause-menu case, reconfirmed on the training map. Next: real
+  lighting, patch/curve tessellation (the 788 still-skipped BSP
+  surfaces), broader `.shader` stage support (blend modes, tcMod
+  scroll/animation), or real `DrawString`/font rendering (found as a
+  genuine unimplemented stub during this session's investigation -
+  distinct from this session's fix, since `ui/main.urc`'s button "text"
+  turned out to be baked into the button images, not dynamically drawn;
+  other UI screens that DO use dynamic text will currently render it as
+  nothing) are all still open.
+
 - 2026-09-07: Phase 1, session 8 shipped: real `.shader` script parsing
   (`RT_FindShaderScriptTexture`, `rt_image.mm`) - the gating dependency
   session 7 identified for its texturing infrastructure to have any
