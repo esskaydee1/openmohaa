@@ -152,6 +152,40 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 10 shipped: real per-vertex directional
+  lighting for both world geometry and entities, replacing flat/uniform
+  color everywhere. Honest scope: a single fixed "sun" direction
+  (`RT_GetLightDir`, `rt_scene.mm`) with a simple ambient-floor +
+  Lambertian diffuse term (`mix(0.35, 1.0, max(dot(N,L),0))`) - not yet
+  anything derived from a map's actual light entities or BSP lightgrid
+  (real, separate work for later). World geometry now bakes real
+  per-vertex normals from `drawVert_t::normal` (`rt_world.mm`, already
+  present in the BSP data, just unused until now); entity models bake
+  normals in `RT_BakeTikiModel` using only the vertex's FIRST bone
+  weight's rotation, matching the real renderer's own
+  `SkelVertGetNormal` (`tr_model.cpp`) - normals use a single dominant
+  bone even in the fully-correct animated path, unlike positions which
+  correctly sum every weight; the flat-magenta placeholder box also got
+  real per-face normals (6 hardcoded outward directions) so it's lit
+  consistently with everything else rather than being a special case.
+  Both 3D pipelines (`rt_vertex_3d`/`rt_fragment_3d` and
+  `rt_vertex_3d_tex`/`rt_fragment_3d_tex`) now take a per-vertex normal
+  buffer plus a per-draw `normalMatrix` (the entity's model-rotation 3x3,
+  valid directly with no inverse-transpose since `RT_BuildModelMatrix`'s
+  axes are always orthonormal) and a shared `lightDir` uniform. Visually
+  confirmed live on the training map: previously-flat, uniformly-gray
+  terrain and structures now show real per-face shading - a wooden
+  guard tower's individual planks/beams are now clearly visible via
+  light/dark face contrast, where before they blended into flat
+  background gray with no visible structure at all. No regression (world
+  load, entity registration/texturing, 2D UI all unaffected code paths);
+  stable for 4+ minutes on the training map. Next: real lighting derived
+  from the map's actual data (BSP lightgrid or light entities, replacing
+  the fixed sun direction), patch/curve tessellation (the 788
+  still-skipped BSP surfaces), broader `.shader` stage support (blend
+  modes, tcMod scroll/animation), or real `DrawString`/font rendering
+  are all still open.
+
 - 2026-09-07: Phase 1, session 9 shipped: fixed a real, previously
   undetected Y-axis bug in session 5's `Set2DWindow`/`Scissor` fix. Root
   cause: `UIWidget::set2D()` (`code/uilib/uiwidget.cpp`) computes its Y

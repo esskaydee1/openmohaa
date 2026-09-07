@@ -57,6 +57,14 @@ struct rtModel_t {
 	// no resolvable texture; cheap to keep unconditionally rather than
 	// track whether any surface of this model ended up needing it.
 	id<MTLBuffer> texcoordBuffer;
+	// Session 10: per-vertex normal, transformed into model space by the
+	// vertex's first bone weight only (matching the real renderer's own
+	// SkelVertGetNormal, tr_model.cpp - normals use a single dominant
+	// bone even in the fully-correct animated path, unlike positions
+	// which sum every weight). Rotated into world space per-draw by the
+	// entity's own rotation (RT_RenderScene), same as position's model
+	// matrix.
+	id<MTLBuffer> normalBuffer;
 	id<MTLBuffer> indexBuffer;
 	int indexCount;
 	int numSurfaces;
@@ -80,26 +88,46 @@ int numRtSceneEntities = 0;
 id<MTLRenderPipelineState> rtPipeline3D = nil;
 id<MTLDepthStencilState> rtDepthState3D = nil;
 id<MTLBuffer> rtBoxVertexBuffer = nil;
+id<MTLBuffer> rtBoxNormalBuffer = nil;
 int rtBoxVertexCount = 0;
 
 // Shared by both entity placeholders (magenta) and world geometry (gray,
 // see rt_world.mm) - same vertex function, one fragment color uniform
 // so both can reuse this one pipeline/depth state rather than each
 // needing their own.
+//
+// Session 10: real per-vertex lighting - a single fixed directional
+// "sun" (RT_GetLightDir below), not yet anything derived from the map's
+// actual light entities or BSP lightgrid (that's real, separate work -
+// this session's honest scope is "shading exists and responds to
+// surface orientation," not "matches the original game's lighting").
+// normalMatrix rotates a model-space normal into world space - for
+// world geometry (identity model matrix) that's just the identity;
+// for an entity it's the same rotation as its model matrix, extracted
+// as a 3x3 (valid directly, no inverse-transpose needed, since
+// RT_BuildModelMatrix's axes are always orthonormal - no non-uniform
+// scale to correct for).
 const char *rtShaderSource3D =
 	"#include <metal_stdlib>\n"
 	"using namespace metal;\n"
-	"struct VertexOut { float4 position [[position]]; };\n"
+	"struct VertexOut { float4 position [[position]]; float3 worldNormal; };\n"
 	"vertex VertexOut rt_vertex_3d(uint vertexID [[vertex_id]],\n"
 	"    const device float3 *positions [[buffer(0)]],\n"
-	"    constant float4x4 &mvp [[buffer(1)]]) {\n"
+	"    constant float4x4 &mvp [[buffer(1)]],\n"
+	"    const device float3 *normals [[buffer(2)]],\n"
+	"    constant float3x3 &normalMatrix [[buffer(3)]]) {\n"
 	"    VertexOut out;\n"
 	"    out.position = mvp * float4(positions[vertexID], 1.0);\n"
+	"    out.worldNormal = normalMatrix * normals[vertexID];\n"
 	"    return out;\n"
 	"}\n"
 	"fragment float4 rt_fragment_3d(VertexOut in [[stage_in]],\n"
-	"    constant float4 &color [[buffer(0)]]) {\n"
-	"    return color;\n"
+	"    constant float4 &color [[buffer(0)]],\n"
+	"    constant float3 &lightDir [[buffer(1)]]) {\n"
+	"    float3 n = normalize(in.worldNormal);\n"
+	"    float ndotl = max(dot(n, lightDir), 0.0);\n"
+	"    float lighting = mix(0.35, 1.0, ndotl);\n"
+	"    return float4(color.rgb * lighting, color.a);\n"
 	"}\n";
 
 id<MTLRenderPipelineState> rtPipelineTextured3D = nil;
@@ -110,22 +138,33 @@ id<MTLSamplerState> rtSamplerTextured3D = nil;
 // per-vertex buffer (2) for texcoords - kept as a parallel array rather
 // than interleaved with position so the untextured flat path above can
 // keep reading a model's positions buffer completely unchanged.
+// Session 10: same normal/normalMatrix lighting as rt_vertex_3d/
+// rt_fragment_3d above, applied to the sampled texture color instead of
+// a flat uniform color.
 const char *rtShaderSourceTextured3D =
 	"#include <metal_stdlib>\n"
 	"using namespace metal;\n"
-	"struct VertexOutTex { float4 position [[position]]; float2 texcoord; };\n"
+	"struct VertexOutTex { float4 position [[position]]; float2 texcoord; float3 worldNormal; };\n"
 	"vertex VertexOutTex rt_vertex_3d_tex(uint vertexID [[vertex_id]],\n"
 	"    const device float3 *positions [[buffer(0)]],\n"
 	"    constant float4x4 &mvp [[buffer(1)]],\n"
-	"    const device float2 *texcoords [[buffer(2)]]) {\n"
+	"    const device float2 *texcoords [[buffer(2)]],\n"
+	"    const device float3 *normals [[buffer(3)]],\n"
+	"    constant float3x3 &normalMatrix [[buffer(4)]]) {\n"
 	"    VertexOutTex out;\n"
 	"    out.position = mvp * float4(positions[vertexID], 1.0);\n"
 	"    out.texcoord = texcoords[vertexID];\n"
+	"    out.worldNormal = normalMatrix * normals[vertexID];\n"
 	"    return out;\n"
 	"}\n"
 	"fragment float4 rt_fragment_3d_tex(VertexOutTex in [[stage_in]],\n"
-	"    texture2d<float> tex [[texture(0)]], sampler samp [[sampler(0)]]) {\n"
-	"    return tex.sample(samp, in.texcoord);\n"
+	"    texture2d<float> tex [[texture(0)]], sampler samp [[sampler(0)]],\n"
+	"    constant float3 &lightDir [[buffer(0)]]) {\n"
+	"    float4 texColor = tex.sample(samp, in.texcoord);\n"
+	"    float3 n = normalize(in.worldNormal);\n"
+	"    float ndotl = max(dot(n, lightDir), 0.0);\n"
+	"    float lighting = mix(0.35, 1.0, ndotl);\n"
+	"    return float4(texColor.rgb * lighting, texColor.a);\n"
 	"}\n";
 
 bool RT_EnsurePipelineTextured3D( void )
@@ -238,6 +277,19 @@ bool RT_EnsurePipeline3D( void )
 	rtBoxVertexCount = 36;
 	rtBoxVertexBuffer = [device newBufferWithBytes:boxVerts length:sizeof( boxVerts ) options:MTLResourceStorageModeShared];
 
+	// One outward normal per face, repeated for each of that face's 6
+	// vertices - matches boxVerts' own face-by-face layout exactly, so
+	// index i's normal is simply face(i)'s constant outward direction.
+	static const simd_float3 boxNormals[36] = {
+		{ 0, -1, 0 }, { 0, -1, 0 }, { 0, -1, 0 }, { 0, -1, 0 }, { 0, -1, 0 }, { 0, -1, 0 },
+		{ 0, 1, 0 }, { 0, 1, 0 }, { 0, 1, 0 }, { 0, 1, 0 }, { 0, 1, 0 }, { 0, 1, 0 },
+		{ -1, 0, 0 }, { -1, 0, 0 }, { -1, 0, 0 }, { -1, 0, 0 }, { -1, 0, 0 }, { -1, 0, 0 },
+		{ 1, 0, 0 }, { 1, 0, 0 }, { 1, 0, 0 }, { 1, 0, 0 }, { 1, 0, 0 }, { 1, 0, 0 },
+		{ 0, 0, -1 }, { 0, 0, -1 }, { 0, 0, -1 }, { 0, 0, -1 }, { 0, 0, -1 }, { 0, 0, -1 },
+		{ 0, 0, 1 }, { 0, 0, 1 }, { 0, 0, 1 }, { 0, 0, 1 }, { 0, 0, 1 }, { 0, 0, 1 },
+	};
+	rtBoxNormalBuffer = [device newBufferWithBytes:boxNormals length:sizeof( boxNormals ) options:MTLResourceStorageModeShared];
+
 	return true;
 }
 
@@ -249,6 +301,29 @@ id<MTLRenderPipelineState> RT_GetPipeline3D( void )
 id<MTLDepthStencilState> RT_GetDepthState3D( void )
 {
 	return rtDepthState3D;
+}
+
+// A single fixed directional "sun" - session 10's honest scope is real
+// shading that responds to surface orientation, not yet anything
+// derived from a map's actual light entities or BSP lightgrid (that's
+// real, separate work). Shared by rt_world.mm so world geometry and
+// entities are lit consistently from the same direction.
+simd_float3 RT_GetLightDir( void )
+{
+	return simd_normalize( simd_make_float3( 0.35f, -0.45f, 0.82f ) );
+}
+
+// Extracts the rotation-only 3x3 from a 4x4 model matrix, for
+// transforming a model-space normal into world space. Valid directly,
+// without an inverse-transpose, because RT_BuildModelMatrix's axes are
+// always orthonormal (no non-uniform scale ever applied).
+simd_float3x3 RT_ModelRotation3x3( simd_float4x4 model )
+{
+	simd_float3x3 m;
+	m.columns[0] = simd_make_float3( model.columns[0].x, model.columns[0].y, model.columns[0].z );
+	m.columns[1] = simd_make_float3( model.columns[1].x, model.columns[1].y, model.columns[1].z );
+	m.columns[2] = simd_make_float3( model.columns[2].x, model.columns[2].y, model.columns[2].z );
+	return m;
 }
 
 // See code/renderergl2/tr_main.c R_RotateForViewer's s_flipMatrix comment
@@ -359,6 +434,7 @@ static void RT_BakeTikiModel( dtiki_t *tiki, rtModel_t *model )
 {
 	model->vertexBuffer = nil;
 	model->texcoordBuffer = nil;
+	model->normalBuffer = nil;
 	model->indexBuffer = nil;
 	model->indexCount = 0;
 	model->numSurfaces = 0;
@@ -373,6 +449,7 @@ static void RT_BakeTikiModel( dtiki_t *tiki, rtModel_t *model )
 
 	std::vector<simd_float3> verts;
 	std::vector<simd_float2> texcoords;
+	std::vector<simd_float3> normals;
 	std::vector<uint32_t> indices;
 
 	for ( int meshIndex = 0; meshIndex < tiki->numMeshes; meshIndex++ )
@@ -393,6 +470,7 @@ static void RT_BakeTikiModel( dtiki_t *tiki, rtModel_t *model )
 					+ vert->numMorphs * sizeof( skeletorMorph_t ) );
 
 				vec3_t out = { 0.0f, 0.0f, 0.0f };
+				int firstBoneNum = -1;
 				for ( int w = 0; w < vert->numWeights; w++ )
 				{
 					// Multiple meshes in one TIKI can share a skeleton
@@ -409,6 +487,8 @@ static void RT_BakeTikiModel( dtiki_t *tiki, rtModel_t *model )
 					{
 						boneNum = weight->boneIndex;
 					}
+					if ( w == 0 )
+						firstBoneNum = boneNum;
 
 					skelBoneCache_t *bone = &bones[boneNum];
 					out[0] += ( ( weight->offset[0] * bone->matrix[0][0] + weight->offset[1] * bone->matrix[1][0]
@@ -424,6 +504,29 @@ static void RT_BakeTikiModel( dtiki_t *tiki, rtModel_t *model )
 				verts.push_back( simd_make_float3(
 					out[0] * tiki->load_scale, out[1] * tiki->load_scale, out[2] * tiki->load_scale ) );
 				texcoords.push_back( simd_make_float2( vert->texCoords[0], vert->texCoords[1] ) );
+
+				// Normal: the real renderer's SkelVertGetNormal
+				// (tr_model.cpp) transforms by only the vertex's FIRST
+				// weight's bone rotation, never summed across weights
+				// like position - true even in the fully-correct
+				// animated path, so this matches established behavior
+				// rather than being a shortcut.
+				if ( firstBoneNum >= 0 )
+				{
+					skelBoneCache_t *bone = &bones[firstBoneNum];
+					simd_float3 n;
+					n.x = vert->normal[0] * bone->matrix[0][0] + vert->normal[1] * bone->matrix[1][0]
+						+ vert->normal[2] * bone->matrix[2][0];
+					n.y = vert->normal[0] * bone->matrix[0][1] + vert->normal[1] * bone->matrix[1][1]
+						+ vert->normal[2] * bone->matrix[2][1];
+					n.z = vert->normal[0] * bone->matrix[0][2] + vert->normal[1] * bone->matrix[1][2]
+						+ vert->normal[2] * bone->matrix[2][2];
+					normals.push_back( n );
+				}
+				else
+				{
+					normals.push_back( simd_make_float3( 0.0f, 0.0f, 1.0f ) );
+				}
 
 				vert = (skeletorVertex_t *)( (byte *)vert + sizeof( skeletorVertex_t )
 					+ sizeof( skeletorMorph_t ) * vert->numMorphs
@@ -467,6 +570,9 @@ static void RT_BakeTikiModel( dtiki_t *tiki, rtModel_t *model )
 	model->texcoordBuffer = [RT_GetDevice() newBufferWithBytes:texcoords.data()
 	                                                      length:texcoords.size() * sizeof( simd_float2 )
 	                                                     options:MTLResourceStorageModeShared];
+	model->normalBuffer = [RT_GetDevice() newBufferWithBytes:normals.data()
+	                                                    length:normals.size() * sizeof( simd_float3 )
+	                                                   options:MTLResourceStorageModeShared];
 	model->indexBuffer = [RT_GetDevice() newBufferWithBytes:indices.data()
 	                                                   length:indices.size() * sizeof( uint32_t )
 	                                                  options:MTLResourceStorageModeShared];
@@ -659,11 +765,13 @@ static void RT_RenderScene( const refdef_t *fd )
 	// all (draws the box fallback instead) - not meant to be mistaken
 	// for final art either way.
 	simd_float4 entityColor = simd_make_float4( 1.0f, 0.0f, 1.0f, 1.0f );
+	simd_float3 lightDir = RT_GetLightDir();
 
 	for ( int i = 0; i < numRtSceneEntities; i++ )
 	{
 		simd_float4x4 model = RT_BuildModelMatrix( rtSceneEntities[i].origin, rtSceneEntities[i].axis );
 		simd_float4x4 mvp = simd_mul( viewProj, model );
+		simd_float3x3 normalMatrix = RT_ModelRotation3x3( model );
 
 		qhandle_t hModel = rtSceneEntities[i].hModel;
 		rtModel_t *m = ( hModel >= 1 && hModel <= numRtModels ) ? &rtModels[hModel] : NULL;
@@ -681,8 +789,11 @@ static void RT_RenderScene( const refdef_t *fd )
 					[encoder setVertexBuffer:m->vertexBuffer offset:0 atIndex:0];
 					[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
 					[encoder setVertexBuffer:m->texcoordBuffer offset:0 atIndex:2];
+					[encoder setVertexBuffer:m->normalBuffer offset:0 atIndex:3];
+					[encoder setVertexBytes:&normalMatrix length:sizeof( normalMatrix ) atIndex:4];
 					[encoder setFragmentTexture:surf->texture atIndex:0];
 					[encoder setFragmentSamplerState:rtSamplerTextured3D atIndex:0];
+					[encoder setFragmentBytes:&lightDir length:sizeof( lightDir ) atIndex:0];
 				}
 				else
 				{
@@ -690,7 +801,10 @@ static void RT_RenderScene( const refdef_t *fd )
 					[encoder setDepthStencilState:rtDepthState3D];
 					[encoder setVertexBuffer:m->vertexBuffer offset:0 atIndex:0];
 					[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
+					[encoder setVertexBuffer:m->normalBuffer offset:0 atIndex:2];
+					[encoder setVertexBytes:&normalMatrix length:sizeof( normalMatrix ) atIndex:3];
 					[encoder setFragmentBytes:&entityColor length:sizeof( entityColor ) atIndex:0];
+					[encoder setFragmentBytes:&lightDir length:sizeof( lightDir ) atIndex:1];
 				}
 
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
@@ -706,7 +820,10 @@ static void RT_RenderScene( const refdef_t *fd )
 			[encoder setDepthStencilState:rtDepthState3D];
 			[encoder setVertexBuffer:rtBoxVertexBuffer offset:0 atIndex:0];
 			[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
+			[encoder setVertexBuffer:rtBoxNormalBuffer offset:0 atIndex:2];
+			[encoder setVertexBytes:&normalMatrix length:sizeof( normalMatrix ) atIndex:3];
 			[encoder setFragmentBytes:&entityColor length:sizeof( entityColor ) atIndex:0];
+			[encoder setFragmentBytes:&lightDir length:sizeof( lightDir ) atIndex:1];
 			[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:rtBoxVertexCount];
 		}
 	}

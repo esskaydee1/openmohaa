@@ -26,10 +26,12 @@ lighting/material/culling work on top of it.
 bool RT_EnsurePipeline3D( void );
 id<MTLRenderPipelineState> RT_GetPipeline3D( void );
 id<MTLDepthStencilState> RT_GetDepthState3D( void );
+simd_float3 RT_GetLightDir( void );
 
 namespace {
 
 id<MTLBuffer> rtWorldVertexBuffer = nil;
+id<MTLBuffer> rtWorldNormalBuffer = nil;
 int rtWorldVertexCount = 0;
 
 } // namespace
@@ -103,12 +105,15 @@ static void RT_LoadWorld( const char *name )
 		return;
 	}
 
-	// Flat, non-indexed position-only triangle list - simplest thing
-	// that reuses the existing entity pipeline's vertex layout
-	// (device float3 *positions) unchanged. World-space already; BSP
-	// vertex positions need no per-surface transform.
+	// Flat, non-indexed triangle list - simplest thing that reuses the
+	// existing entity pipeline's vertex layout (device float3
+	// *positions, parallel device float3 *normals) unchanged. World-space
+	// already; BSP vertex positions/normals need no per-surface
+	// transform.
 	std::vector<simd_float3> worldVerts;
+	std::vector<simd_float3> worldNormals;
 	worldVerts.reserve( totalVerts );
+	worldNormals.reserve( totalVerts );
 
 	for ( int i = 0; i < numSurfaces; i++ )
 	{
@@ -126,7 +131,9 @@ static void RT_LoadWorld( const char *name )
 				continue; // malformed index - skip rather than read out of bounds
 
 			const float *xyz = surfVerts[vertIndex].xyz;
+			const float *normal = surfVerts[vertIndex].normal;
 			worldVerts.push_back( simd_make_float3( xyz[0], xyz[1], xyz[2] ) );
+			worldNormals.push_back( simd_make_float3( normal[0], normal[1], normal[2] ) );
 		}
 	}
 
@@ -141,6 +148,9 @@ static void RT_LoadWorld( const char *name )
 	rtWorldVertexCount = (int)worldVerts.size();
 	rtWorldVertexBuffer = [RT_GetDevice() newBufferWithBytes:worldVerts.data()
 	                                                   length:worldVerts.size() * sizeof( simd_float3 )
+	                                                  options:MTLResourceStorageModeShared];
+	rtWorldNormalBuffer = [RT_GetDevice() newBufferWithBytes:worldNormals.data()
+	                                                   length:worldNormals.size() * sizeof( simd_float3 )
 	                                                  options:MTLResourceStorageModeShared];
 
 	ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar surfaces, %d verts uploaded\n",
@@ -161,14 +171,22 @@ void RT_DrawWorld( simd_float4x4 viewProj )
 	[encoder setVertexBuffer:rtWorldVertexBuffer offset:0 atIndex:0];
 
 	// No entity transform - world vertices are already in world space,
-	// so the model matrix is identity: MVP == viewProj.
+	// so the model matrix is identity: MVP == viewProj, and normals need
+	// no rotation either (identity 3x3).
 	simd_float4x4 mvp = viewProj;
 	[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
+	[encoder setVertexBuffer:rtWorldNormalBuffer offset:0 atIndex:2];
+	simd_float3x3 identityNormalMatrix = {
+		simd_make_float3( 1, 0, 0 ), simd_make_float3( 0, 1, 0 ), simd_make_float3( 0, 0, 1 )
+	};
+	[encoder setVertexBytes:&identityNormalMatrix length:sizeof( identityNormalMatrix ) atIndex:3];
 
 	// Neutral gray, distinct from the entity placeholders' magenta -
 	// this is real (if untextured) level geometry, not a stand-in.
 	simd_float4 worldColor = simd_make_float4( 0.6f, 0.6f, 0.6f, 1.0f );
 	[encoder setFragmentBytes:&worldColor length:sizeof( worldColor ) atIndex:0];
+	simd_float3 lightDir = RT_GetLightDir();
+	[encoder setFragmentBytes:&lightDir length:sizeof( lightDir ) atIndex:1];
 
 	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:rtWorldVertexCount];
 }
