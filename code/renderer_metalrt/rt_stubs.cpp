@@ -27,18 +27,6 @@ static qhandle_t RT_RegisterSkin( const char *name )
 	return 0;
 }
 
-static qhandle_t RT_RegisterShader( const char *name )
-{
-	RT_STUB_ONCE();
-	return 0;
-}
-
-static qhandle_t RT_RegisterShaderNoMip( const char *name )
-{
-	RT_STUB_ONCE();
-	return 0;
-}
-
 static void RT_LoadWorld( const char *name )
 {
 	RT_STUB_ONCE();
@@ -116,11 +104,6 @@ static void RT_UploadCinematic( int w, int h, int cols, int rows, const byte *da
 }
 
 static void RT_Set2DWindow( int x, int y, int w, int h, float left, float right, float bottom, float top, float n, float f )
-{
-	RT_STUB_ONCE();
-}
-
-static void RT_DrawStretchPic( float x, float y, float w, float h, float s1, float t1, float s2, float t2, qhandle_t hShader )
 {
 	RT_STUB_ONCE();
 }
@@ -501,8 +484,8 @@ void RT_InitStubs( refexport_t *re )
 {
 	re->RegisterModel = RT_RegisterModel;
 	re->RegisterSkin = RT_RegisterSkin;
-	re->RegisterShader = RT_RegisterShader;
-	re->RegisterShaderNoMip = RT_RegisterShaderNoMip;
+	// RegisterShader/RegisterShaderNoMip: real implementations, see
+	// RT_InitImageFunctions (rt_image.mm), called separately below.
 	re->LoadWorld = RT_LoadWorld;
 	re->SetWorldVisData = RT_SetWorldVisData;
 
@@ -520,7 +503,7 @@ void RT_InitStubs( refexport_t *re )
 	re->DrawStretchRaw = RT_DrawStretchRaw;
 	re->UploadCinematic = RT_UploadCinematic;
 	re->Set2DWindow = RT_Set2DWindow;
-	re->DrawStretchPic = RT_DrawStretchPic;
+	// DrawStretchPic: real implementation, see RT_InitImageFunctions.
 	re->DrawStretchPic2 = RT_DrawStretchPic2;
 	re->DrawTilePic = RT_DrawTilePic;
 	re->DrawTilePicOffset = RT_DrawTilePicOffset;

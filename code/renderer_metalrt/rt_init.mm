@@ -36,6 +36,7 @@ CAMetalLayer *rtLayer = nil;
 
 id<CAMetalDrawable> rtCurrentDrawable = nil;
 id<MTLCommandBuffer> rtCurrentCommandBuffer = nil;
+id<MTLRenderCommandEncoder> rtCurrentEncoder = nil;
 
 // Deliberately fixed for session 1 - real video-mode selection (r_mode,
 // r_fullscreen, custom resolution, matching sdl_glimp.c/sdl_metalimp.c's
@@ -150,6 +151,16 @@ void RT_ShutdownWindowAndDevice( void )
 
 } // namespace
 
+id<MTLDevice> RT_GetDevice( void )
+{
+	return rtDevice;
+}
+
+id<MTLRenderCommandEncoder> RT_GetCurrentEncoder( void )
+{
+	return rtCurrentEncoder;
+}
+
 /*
 ===============
 RE_Shutdown
@@ -195,9 +206,10 @@ static void RE_EndRegistration( void )
 ===============
 RE_BeginFrame / RE_EndFrame
 
-The whole point of session 1: prove the swapchain/present loop is
-correct before any real scene content exists. Acquires a drawable and
-clears it to a solid, distinctive color; RE_EndFrame presents it.
+Acquires a drawable, clears it, and opens a render command encoder that
+stays open for the rest of the frame - RT_GetCurrentEncoder() (rt_local.h)
+lets other files (rt_image.mm's DrawStretchPic) encode draw calls into
+it. RE_EndFrame closes the encoder and presents.
 ===============
 */
 static void RE_BeginFrame( stereoFrame_t stereoFrame )
@@ -219,14 +231,20 @@ static void RE_BeginFrame( stereoFrame_t stereoFrame )
 	// unrelated bug (e.g. an uninitialized buffer) would plausibly produce -
 	// so a live session can tell at a glance that this is renderer_metalrt
 	// actually presenting, not a black window from something else failing.
+	// Anything drawn this frame (DrawStretchPic etc.) paints over it.
 	pass.colorAttachments[0].clearColor = MTLClearColorMake( 0.0, 0.15, 0.2, 1.0 );
 
-	id<MTLRenderCommandEncoder> encoder = [rtCurrentCommandBuffer renderCommandEncoderWithDescriptor:pass];
-	[encoder endEncoding];
+	rtCurrentEncoder = [rtCurrentCommandBuffer renderCommandEncoderWithDescriptor:pass];
 }
 
 static void RE_EndFrame( int *frontEndMsec, int *backEndMsec )
 {
+	if ( rtCurrentEncoder != nil )
+	{
+		[rtCurrentEncoder endEncoding];
+		rtCurrentEncoder = nil;
+	}
+
 	if ( rtCurrentCommandBuffer != nil && rtCurrentDrawable != nil )
 	{
 		[rtCurrentCommandBuffer presentDrawable:rtCurrentDrawable];
@@ -243,10 +261,13 @@ static void RE_EndFrame( int *frontEndMsec, int *backEndMsec )
 		*backEndMsec = 0;
 }
 
-// Forward declaration - the rest of refexport_t's ~78 functions are
-// assigned by RT_InitStubs (rt_stubs.cpp), keeping the loud-stub
-// boilerplate out of this file.
+// Forward declarations - the rest of refexport_t's functions are
+// assigned by RT_InitStubs (rt_stubs.cpp, loud stubs) and
+// RT_InitImageFunctions (rt_image.mm, real RegisterShader/
+// RegisterShaderNoMip/DrawStretchPic), keeping that boilerplate out of
+// this file.
 void RT_InitStubs( refexport_t *re );
+void RT_InitImageFunctions( refexport_t *re );
 
 /*
 @@@@@@@@@@@@@@@@@@@@@
@@ -294,6 +315,9 @@ extern "C" refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp )
 
 	// Everything else: loud stubs until a later session implements them.
 	RT_InitStubs( &re );
+
+	// Real image registration + 2D drawing (Phase 1 session 2).
+	RT_InitImageFunctions( &re );
 
 	ri.Printf( PRINT_ALL, "----- finished renderer_metalrt R_Init -----\n" );
 

@@ -29,6 +29,18 @@ extern glconfig_t rtGlConfig;
 }
 #endif
 
+#ifdef __OBJC__
+// Accessors into rt_init.mm's module state, for the drawing/image code
+// (also .mm, so these Objective-C types are safe to expose here; a
+// plain .cpp translation unit like rt_stubs.cpp never sees this block).
+#import <Metal/Metal.h>
+id<MTLDevice> RT_GetDevice( void );
+// The render command encoder for the frame currently being built by
+// RE_BeginFrame/RE_EndFrame, or nil outside of one - draw calls between
+// those two calls encode into this.
+id<MTLRenderCommandEncoder> RT_GetCurrentEncoder( void );
+#endif
+
 // One-time-per-call-site logging for functions that aren't implemented
 // yet: loud on first use (impossible to miss in the log), silent after
 // that so a function called every frame doesn't flood the console.

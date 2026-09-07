@@ -152,6 +152,28 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 2 shipped: real `RegisterShader`/
+  `RegisterShaderNoMip`/`DrawStretchPic` (`rt_image.mm`), visually
+  confirmed live - a real menu button ("QUIT") loads and draws correctly,
+  alpha-blended, over the session-1 clear color. `RegisterShader`
+  currently treats its name as a direct image file (TGA/BMP/PCX only -
+  JPG needs libjpeg, PNG needs puff.c's inflate, both real but deferred
+  to their own session for the CMake wiring), not a `.shader` script -
+  that parser is Phase 2's job, so most menu shader names correctly log
+  "no .shader script support yet" and don't draw, which is expected, not
+  a bug. Also restructured `RE_BeginFrame`/`RE_EndFrame` to keep one
+  `MTLRenderCommandEncoder` open across the whole frame (previously
+  opened+closed immediately in `BeginFrame` with nothing to draw) so
+  draw calls in between can encode into it; added `RT_GetDevice()`/
+  `RT_GetCurrentEncoder()` accessors to rt_local.h for that. 2D
+  projection is a direct CPU-side screen-pixels-to-NDC conversion, no
+  projection matrix/uniform yet - fine for now, revisit if something
+  needs it (e.g. a future scissor/viewport feature). Next: either wire
+  up JPG/PNG loading (real content will need both), or start on
+  `RegisterModel`/a minimal 3D scene path (`ClearScene`/
+  `AddRefEntityToScene`/`RenderScene`) - whichever blocks seeing more of
+  the actual menu/game content next.
+
 - 2026-09-07: Phase 1, session 1 shipped: `renderer_metalrt` builds and
   loads via `cl_renderer "metalrt"` (new `cmake/renderer_metalrt.cmake`,
   `enable_language(OBJCXX)` added to macos.cmake for this - the project's

@@ -9,16 +9,23 @@ endif()
 include(utils/set_output_dirs)
 include(renderer_common)
 
-# Session 1 scope: lifecycle + a working swapchain/present loop only.
-# Deliberately does NOT pull in RENDERER_COMMON_SOURCES (image loaders,
-# font/noise helpers) yet - nothing here calls them, and several of those
-# files assume the qgl* proc-pointer table exists, which this renderer
-# never populates (it never touches OpenGL/GLES at all). Add sources here
-# as later sessions give them a real (non-stub) implementation that needs
-# them - see code/renderer_metalrt/CLAUDE.md's status log.
+# Deliberately does NOT pull in all of RENDERER_COMMON_SOURCES - several
+# of those files assume the qgl* proc-pointer table exists, which this
+# renderer never populates (it never touches OpenGL/GLES at all). Add
+# sources individually as sessions give them a real (non-stub)
+# implementation that needs them - see CLAUDE.md's status log.
+#
+# tr_image_tga/bmp/pcx.c are pure C, no external library (unlike
+# tr_image_jpg.c, which needs libjpeg, and tr_image_png.c, which needs
+# puff.c's inflate) - session 2 only wires up the dependency-free
+# formats; jpg/png are real, separate follow-up work.
 set(RENDERER_METALRT_SOURCES
     ${SOURCE_DIR}/renderer_metalrt/rt_init.mm
+    ${SOURCE_DIR}/renderer_metalrt/rt_image.mm
     ${SOURCE_DIR}/renderer_metalrt/rt_stubs.cpp
+    ${SOURCE_DIR}/renderercommon/tr_image_tga.c
+    ${SOURCE_DIR}/renderercommon/tr_image_bmp.c
+    ${SOURCE_DIR}/renderercommon/tr_image_pcx.c
 )
 
 set(RENDERER_METALRT_BASENAME renderer_metalrt)
