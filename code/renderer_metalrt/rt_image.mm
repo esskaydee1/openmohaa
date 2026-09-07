@@ -38,6 +38,12 @@ struct rtImage_t {
 	int width;
 	int height;
 	char name[MAX_QPATH];
+	// Session 13: classified from the resolved .shader's blendfunc line,
+	// if any (RT_BLEND_OPAQUE for a direct-image-file resolution, which
+	// never has one). Cached here rather than re-parsed per use, since
+	// the same shader-script scan that finds a texture path already
+	// visits any blendfunc line in the same block.
+	rtBlendMode_t blendMode;
 };
 
 #define MAX_RT_IMAGES 1024
@@ -173,6 +179,39 @@ bool RT_EnsurePipeline2D( void )
 	return true;
 }
 
+// Session 13: classifies a shader's `blendfunc` line into one of 3
+// buckets (see rtBlendMode_t, rt_local.h) - mirrors ParseStage's own
+// "simple blends first, then complex double blends" dispatch
+// (tr_shader.c), minus a faithful mapping of every possible GL src/dst
+// factor pair (Metal needs a distinct pipeline per blend config, so
+// this renderer only maintains 3 - opaque, alpha, additive - rather
+// than one per unique shader combination). `add`/`alphaadd` (an
+// OPENMOHAA-specific preset) both classify as additive (their dst
+// factor is always ONE - i.e. "accumulate onto the background," the
+// defining trait of additive blending); `blend` and the complex
+// double-token form classify as alpha (including "filter", a
+// multiply-darken preset this renderer doesn't have a dedicated
+// pipeline for - alpha blending is the closer approximation of the two
+// non-opaque options).
+rtBlendMode_t RT_ClassifyBlendFunc( char **p )
+{
+	char *token = COM_ParseExt( p, qfalse );
+	if ( token[0] == '\0' )
+		return RT_BLEND_OPAQUE;
+
+	if ( !Q_stricmp( token, "add" ) || !Q_stricmp( token, "alphaadd" ) )
+		return RT_BLEND_ADDITIVE;
+	if ( !Q_stricmp( token, "filter" ) || !Q_stricmp( token, "blend" ) )
+		return RT_BLEND_ALPHA;
+
+	// Complex double-token form: <srcFactor> <dstFactor>. Only the dst
+	// factor matters for this coarse classification - GLS_DSTBLEND_ONE
+	// (dst factor "GL_ONE") is what every additive-looking blend has in
+	// common, regardless of its src factor.
+	char *dstToken = COM_ParseExt( p, qfalse );
+	return ( !Q_stricmp( dstToken, "GL_ONE" ) ) ? RT_BLEND_ADDITIVE : RT_BLEND_ALPHA;
+}
+
 // Session 8: resolves a shader NAME (e.g. "ranger_top") to a real
 // texture PATH (e.g. "textures/models/human/.../ranger_assaultvest.tga")
 // by scanning every scripts/*.shader file for a matching top-level
@@ -183,18 +222,23 @@ bool RT_EnsurePipeline2D( void )
 // in a later one (e.g. scripts/algiers.shader's lightplaster1: stage 1
 // is "map $lightmap", stage 2 is the real texture). Mirrors the real
 // renderer's FindShaderInShaderText + ParseStage's map/clampmap handling
-// (tr_shader.c), minus everything else a shader can specify (blend
-// modes, tcMod, rgbGen, sort, cull, deformVertexes, sky, fog...) - all
-// silently skipped by the tokenizer's own "not a brace, not what we're
-// looking for" fallthrough, which is correct parser behavior (not a
-// "no silent no-ops" violation - unrecognized keywords are normal, not
-// failures). Re-scans every .shader file per distinct miss rather than
-// keeping one persistent concatenated buffer like the real renderer's
-// startup-time ScanAndLoadShaderFiles - acceptable since
-// RT_RegisterImageCommon below already caches by name, so this only
-// ever runs once per distinct name actually requested, not per frame.
-bool RT_FindShaderScriptTexture( const char *shaderName, char *outPath, size_t outPathSize )
+// (tr_shader.c). Session 13 also classifies the block's `blendfunc`
+// line, if any, via outBlendMode (defaults to RT_BLEND_OPAQUE if none
+// found) - everything else a shader can specify (tcMod, rgbGen, sort,
+// cull, deformVertexes, sky, fog...) is still silently skipped by the
+// tokenizer's own "not a brace, not what we're looking for" fallthrough,
+// which is correct parser behavior (not a "no silent no-ops" violation -
+// unrecognized keywords are normal, not failures). Re-scans every
+// .shader file per distinct miss rather than keeping one persistent
+// concatenated buffer like the real renderer's startup-time
+// ScanAndLoadShaderFiles - acceptable since RT_RegisterImageCommon below
+// already caches by name, so this only ever runs once per distinct name
+// actually requested, not per frame.
+bool RT_FindShaderScriptTexture( const char *shaderName, char *outPath, size_t outPathSize, rtBlendMode_t *outBlendMode )
 {
+	if ( outBlendMode != NULL )
+		*outBlendMode = RT_BLEND_OPAQUE;
+
 	int numFiles = 0;
 	char **fileList = ri.FS_ListFiles( "scripts", ".shader", &numFiles );
 	if ( fileList == NULL )
@@ -227,7 +271,10 @@ bool RT_FindShaderScriptTexture( const char *shaderName, char *outPath, size_t o
 
 			// Matched the shader block by name - the next token must be
 			// its opening brace; scan every stage inside for the first
-			// real texture reference.
+			// real texture reference AND (session 13) any blendfunc -
+			// keep scanning even after the texture's found, since
+			// blendfunc can appear before or after "map" within the
+			// same stage.
 			char *openBrace = COM_ParseExt( &p, qtrue );
 			if ( Q_stricmp( openBrace, "{" ) != 0 )
 				break; // malformed shader block - give up on this file
@@ -250,7 +297,7 @@ bool RT_FindShaderScriptTexture( const char *shaderName, char *outPath, size_t o
 					continue;
 				}
 
-				if ( !Q_stricmp( tok, "map" ) || !Q_stricmpn( tok, "clampmap", 8 ) )
+				if ( !found && ( !Q_stricmp( tok, "map" ) || !Q_stricmpn( tok, "clampmap", 8 ) ) )
 				{
 					// Same-line only, matching ParseStage - a shader
 					// script never breaks a map/clampmap argument across
@@ -261,12 +308,15 @@ bool RT_FindShaderScriptTexture( const char *shaderName, char *outPath, size_t o
 					{
 						Q_strncpyz( outPath, arg, outPathSize );
 						found = true;
-						break;
 					}
+				}
+				else if ( !Q_stricmp( tok, "blendfunc" ) && outBlendMode != NULL )
+				{
+					*outBlendMode = RT_ClassifyBlendFunc( &p );
 				}
 			}
 
-			break; // done with this shader block, found a texture or not
+			break; // done with this shader block
 		}
 
 		ri.FS_FreeFile( fileData );
@@ -374,7 +424,8 @@ qhandle_t RT_RegisterImageCommon( const char *name )
 	char resolvedPath[MAX_QPATH];
 	int width = 0, height = 0;
 	byte *pic = NULL;
-	if ( RT_FindShaderScriptTexture( strippedName, resolvedPath, sizeof( resolvedPath ) ) )
+	rtBlendMode_t blendMode = RT_BLEND_OPAQUE;
+	if ( RT_FindShaderScriptTexture( strippedName, resolvedPath, sizeof( resolvedPath ), &blendMode ) )
 		pic = RT_LoadImageFile( resolvedPath, &width, &height );
 
 	if ( pic == NULL )
@@ -413,6 +464,7 @@ qhandle_t RT_RegisterImageCommon( const char *name )
 	Q_strncpyz( img->name, name, sizeof( img->name ) );
 	img->width = width;
 	img->height = height;
+	img->blendMode = blendMode;
 	img->texture = RT_CreateTexture( pic, width, height );
 
 	ri.Free( pic );
@@ -430,6 +482,15 @@ id<MTLTexture> RT_GetImageTexture( qhandle_t handle )
 	if ( handle <= 0 || handle > numRtImages )
 		return nil;
 	return rtImages[handle].texture;
+}
+
+// Session 13: same reasoning - rt_scene.mm needs a resolved surface
+// texture's blend classification to pick the right 3D pipeline variant.
+rtBlendMode_t RT_GetImageBlendMode( qhandle_t handle )
+{
+	if ( handle <= 0 || handle > numRtImages )
+		return RT_BLEND_OPAQUE;
+	return rtImages[handle].blendMode;
 }
 
 static qhandle_t RT_RegisterShader( const char *name )

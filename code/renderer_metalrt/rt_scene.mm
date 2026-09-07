@@ -26,6 +26,7 @@ through a real camera built from the refdef_t the game actually submits
 // duplicating the direct-image-file loader.
 qhandle_t RT_RegisterImageCommon( const char *name );
 id<MTLTexture> RT_GetImageTexture( qhandle_t handle );
+rtBlendMode_t RT_GetImageBlendMode( qhandle_t handle );
 
 namespace {
 
@@ -37,11 +38,14 @@ namespace {
 // .shader-script names still don't resolve, see RT_RegisterImageCommon's
 // "no .shader script support yet" warning), in which case this surface
 // draws through the flat-magenta fallback pipeline instead, same as
-// every model did before this session.
+// every model did before this session. blendMode (session 13) is only
+// meaningful when texture != nil - it picks which of the 3 textured
+// pipeline variants (opaque/alpha/additive) draws this surface.
 struct rtModelSurface_t {
 	uint32_t indexOffset; // element (not byte) offset into the model's indexBuffer
 	uint32_t indexCount;
 	id<MTLTexture> texture;
+	rtBlendMode_t blendMode;
 };
 
 struct rtModel_t {
@@ -131,6 +135,12 @@ const char *rtShaderSource3D =
 	"}\n";
 
 id<MTLRenderPipelineState> rtPipelineTextured3D = nil;
+// Session 13: two more textured pipeline variants for non-opaque
+// surfaces (see rtBlendMode_t, rt_local.h) - same shader, different
+// color-attachment blend config each.
+id<MTLRenderPipelineState> rtPipelineTexturedAlpha3D = nil;
+id<MTLRenderPipelineState> rtPipelineTexturedAdditive3D = nil;
+id<MTLDepthStencilState> rtDepthStateBlended3D = nil;
 id<MTLSamplerState> rtSamplerTextured3D = nil;
 
 // Session 7: a real per-surface texture, reusing rt_vertex_3d's exact
@@ -185,9 +195,12 @@ bool RT_EnsurePipelineTextured3D( void )
 		return false;
 	}
 
+	id<MTLFunction> vertexFn = [library newFunctionWithName:@"rt_vertex_3d_tex"];
+	id<MTLFunction> fragmentFn = [library newFunctionWithName:@"rt_fragment_3d_tex"];
+
 	MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
-	desc.vertexFunction = [library newFunctionWithName:@"rt_vertex_3d_tex"];
-	desc.fragmentFunction = [library newFunctionWithName:@"rt_fragment_3d_tex"];
+	desc.vertexFunction = vertexFn;
+	desc.fragmentFunction = fragmentFn;
 	desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
 	desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
 
@@ -198,6 +211,61 @@ bool RT_EnsurePipelineTextured3D( void )
 			error ? [[error localizedDescription] UTF8String] : "unknown error" );
 		return false;
 	}
+
+	// Session 13: two more pipeline STATES sharing the exact same
+	// compiled vertex/fragment functions above, differing only in their
+	// color-attachment blend config - one Metal shader, three PSOs,
+	// rather than three separate shader compiles.
+	MTLRenderPipelineDescriptor *alphaDesc = [[MTLRenderPipelineDescriptor alloc] init];
+	alphaDesc.vertexFunction = vertexFn;
+	alphaDesc.fragmentFunction = fragmentFn;
+	alphaDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	alphaDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+	alphaDesc.colorAttachments[0].blendingEnabled = YES;
+	alphaDesc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+	alphaDesc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+	alphaDesc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+	alphaDesc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSourceAlpha;
+	alphaDesc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+	alphaDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+
+	rtPipelineTexturedAlpha3D = [device newRenderPipelineStateWithDescriptor:alphaDesc error:&error];
+	if ( rtPipelineTexturedAlpha3D == nil )
+	{
+		ri.Printf( PRINT_ERROR, "renderer_metalrt: failed to create alpha-blended textured 3D pipeline: %s\n",
+			error ? [[error localizedDescription] UTF8String] : "unknown error" );
+		return false;
+	}
+
+	MTLRenderPipelineDescriptor *additiveDesc = [[MTLRenderPipelineDescriptor alloc] init];
+	additiveDesc.vertexFunction = vertexFn;
+	additiveDesc.fragmentFunction = fragmentFn;
+	additiveDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	additiveDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+	additiveDesc.colorAttachments[0].blendingEnabled = YES;
+	additiveDesc.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+	additiveDesc.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+	additiveDesc.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+	additiveDesc.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+	additiveDesc.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOne;
+	additiveDesc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+
+	rtPipelineTexturedAdditive3D = [device newRenderPipelineStateWithDescriptor:additiveDesc error:&error];
+	if ( rtPipelineTexturedAdditive3D == nil )
+	{
+		ri.Printf( PRINT_ERROR, "renderer_metalrt: failed to create additive textured 3D pipeline: %s\n",
+			error ? [[error localizedDescription] UTF8String] : "unknown error" );
+		return false;
+	}
+
+	// Blended/transparent surfaces test depth (so solid geometry in
+	// front still occludes them) but don't write it - otherwise a
+	// transparent surface would incorrectly block whatever draws behind
+	// it later in the same frame, including other transparent surfaces.
+	MTLDepthStencilDescriptor *blendedDepthDesc = [[MTLDepthStencilDescriptor alloc] init];
+	blendedDepthDesc.depthCompareFunction = MTLCompareFunctionLess;
+	blendedDepthDesc.depthWriteEnabled = NO;
+	rtDepthStateBlended3D = [device newDepthStencilStateWithDescriptor:blendedDepthDesc];
 
 	MTLSamplerDescriptor *samplerDesc = [[MTLSamplerDescriptor alloc] init];
 	samplerDesc.minFilter = MTLSamplerMinMagFilterLinear;
@@ -392,12 +460,14 @@ simd_float4x4 RT_BuildModelMatrix( const float origin[3], const float axis[3][3]
 // geometry surfaces being baked - matched by name, exactly how the real
 // renderer's R_InitStaticModels resolves shaders for tr_model.cpp's
 // RB_StaticMesh) and tries to resolve its first non-empty shader name to
-// a real texture via the same direct-image-file loader DrawStretchPic
-// uses. Most real shader names reference a .shader script this renderer
-// can't parse yet (Phase 2), not a direct image file, so returning nil
-// here is the common case, not a bug - RT_RenderScene falls back to the
-// flat-magenta pipeline for any surface this returns nil for.
-static id<MTLTexture> RT_ResolveSurfaceTexture( dtiki_t *tiki, const char *surfaceName )
+// a real texture via the same direct-image-file/.shader-script loader
+// DrawStretchPic uses. Some real shader names still don't resolve (no
+// matching .shader block and not a direct image file - e.g. procedural-
+// only stages), so returning nil here is expected, not a bug -
+// RT_RenderScene falls back to the flat-magenta pipeline for any
+// surface this returns nil for. outBlendMode (session 13) is only
+// meaningful when a texture is actually returned.
+static id<MTLTexture> RT_ResolveSurfaceTexture( dtiki_t *tiki, const char *surfaceName, rtBlendMode_t *outBlendMode )
 {
 	for ( int i = 0; i < tiki->num_surfaces; i++ )
 	{
@@ -412,7 +482,11 @@ static id<MTLTexture> RT_ResolveSurfaceTexture( dtiki_t *tiki, const char *surfa
 
 			qhandle_t handle = RT_RegisterImageCommon( tikiSurf->shader[k] );
 			if ( handle != 0 )
+			{
+				if ( outBlendMode != NULL )
+					*outBlendMode = RT_GetImageBlendMode( handle );
 				return RT_GetImageTexture( handle );
+			}
 		}
 		break;
 	}
@@ -546,7 +620,8 @@ static void RT_BakeTikiModel( dtiki_t *tiki, rtModel_t *model )
 					rtModelSurface_t *modelSurf = &model->surfaces[model->numSurfaces++];
 					modelSurf->indexOffset = baseIndex;
 					modelSurf->indexCount = surfIndexCount;
-					modelSurf->texture = RT_ResolveSurfaceTexture( tiki, surf->name );
+					modelSurf->blendMode = RT_BLEND_OPAQUE;
+					modelSurf->texture = RT_ResolveSurfaceTexture( tiki, surf->name, &modelSurf->blendMode );
 				}
 				else
 				{
@@ -784,8 +859,26 @@ static void RT_RenderScene( const refdef_t *fd )
 
 				if ( surf->texture != nil && haveTexturedPipeline )
 				{
-					[encoder setRenderPipelineState:rtPipelineTextured3D];
-					[encoder setDepthStencilState:rtDepthState3D];
+					// Session 13: pick the pipeline variant (and its
+					// matching depth state - blended surfaces don't
+					// write depth) by this surface's resolved blend
+					// mode. All three share the same shader/vertex-
+					// buffer bindings, just a different PSO/depth state.
+					id<MTLRenderPipelineState> pipeline = rtPipelineTextured3D;
+					id<MTLDepthStencilState> depthState = rtDepthState3D;
+					if ( surf->blendMode == RT_BLEND_ALPHA )
+					{
+						pipeline = rtPipelineTexturedAlpha3D;
+						depthState = rtDepthStateBlended3D;
+					}
+					else if ( surf->blendMode == RT_BLEND_ADDITIVE )
+					{
+						pipeline = rtPipelineTexturedAdditive3D;
+						depthState = rtDepthStateBlended3D;
+					}
+
+					[encoder setRenderPipelineState:pipeline];
+					[encoder setDepthStencilState:depthState];
 					[encoder setVertexBuffer:m->vertexBuffer offset:0 atIndex:0];
 					[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
 					[encoder setVertexBuffer:m->texcoordBuffer offset:0 atIndex:2];

@@ -15,6 +15,19 @@ See code/renderer_metalrt/CLAUDE.md and docs/ for scope and hard rules.
 // touches OpenGL/GLES, so there's no reason to pull in the qgl* function
 // pointer table or SDL_opengl.h.
 
+// Session 13: blend-mode classification for a .shader's `blendfunc`,
+// shared between rt_image.mm's shader-script parser
+// (RT_FindShaderScriptTexture) and rt_scene.mm's per-surface pipeline
+// selection. Deliberately a coarse 3-way bucket, not a faithful mapping
+// of every GL src/dst blend factor combination Metal could represent -
+// RT_BLEND_ALPHA also covers the real "filter" (multiply-darken) blend
+// preset, an approximation, not a fourth pipeline variant.
+typedef enum {
+	RT_BLEND_OPAQUE,
+	RT_BLEND_ALPHA,
+	RT_BLEND_ADDITIVE
+} rtBlendMode_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif

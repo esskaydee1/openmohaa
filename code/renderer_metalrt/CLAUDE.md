@@ -152,6 +152,48 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 13 shipped: real `.shader` blend-mode
+  support - transparent/additive surfaces (glass, glow, fire, energy
+  effects) previously always rendered fully opaque regardless of what
+  their shader specified. `RT_ClassifyBlendFunc`/`RT_FindShaderScriptTexture`
+  (`rt_image.mm`) now also scan a matched shader block for a `blendfunc`
+  line and classify it into one of 3 buckets (`rtBlendMode_t`,
+  `rt_local.h`): opaque (no blendfunc), alpha, or additive - mirroring
+  `ParseStage`'s own "simple blends first (`add`/`filter`/`blend`, plus
+  OPENMOHAA's `alphaadd`), then complex double-token form" dispatch
+  (`tr_shader.c`), but deliberately coarse: Metal needs a distinct
+  pipeline per blend config, so this renderer maintains 3, not one per
+  unique GL src/dst factor combination - `filter` (a multiply-darken
+  preset) folds into the alpha bucket as the closer of the two
+  approximations, and any complex-form blend whose dst factor is
+  `GL_ONE` (the common trait of every additive-looking blend,
+  regardless of its src factor) classifies as additive. Classification
+  is cached on the resolved image handle (`rtImage_t::blendMode`,
+  `RT_GetImageBlendMode`) alongside its texture, not re-parsed per use.
+  Two new textured 3D pipeline variants (`rtPipelineTexturedAlpha3D`/
+  `rtPipelineTexturedAdditive3D`) share the exact same compiled vertex/
+  fragment shader as the existing opaque one - only their color-
+  attachment blend config differs - plus a separate depth state for
+  both blended variants (`rtDepthStateBlended3D`: tests depth so solid
+  geometry still occludes them, but doesn't write it, so one
+  transparent surface can't incorrectly block another drawn later the
+  same frame). `RT_RenderScene` picks the pipeline+depth-state pair
+  per-surface from its cached blend mode. Verified real content
+  actually uses this: `scripts/environmentalfx.shader` has genuine
+  `blendFunc add` and `blendfunc GL_ONE GL_ONE_MINUS_SRC_ALPHA` lines,
+  both handled correctly by the new classifier (confirmed via static
+  inspection of the retail PK3, not runtime). All 3 pipeline variants
+  compile successfully; stable for 4+ minutes on the training map, no
+  crash. Honest limitation, continued from session 12: the user's
+  screen remained locked for this entire session too, so no live pixel
+  check of an actual transparent/additive surface was possible -
+  correctness rests on real-content syntax validation plus reuse of
+  the already-proven vertex/fragment shader (only the blend STATE is
+  new, a standard, narrow Metal API surface), not a direct visual.
+  **Both this session and session 12 need a real screenshot next time
+  the screen is unlocked before trusting them further** - this is the
+  first priority for the next session, before any new feature work.
+
 - 2026-09-07: Phase 1, session 12 shipped: real font loading and text
   rendering (`LoadFont`/`DrawString`/`GetFontHeight`/`GetFontStringWidth`,
   new `rt_font.mm`), replacing the session-1 crash-safe-but-invisible
