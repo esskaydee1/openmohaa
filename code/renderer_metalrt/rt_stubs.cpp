@@ -85,10 +85,7 @@ static void RT_UploadCinematic( int w, int h, int cols, int rows, const byte *da
 	RT_STUB_ONCE();
 }
 
-static void RT_Set2DWindow( int x, int y, int w, int h, float left, float right, float bottom, float top, float n, float f )
-{
-	RT_STUB_ONCE();
-}
+// Set2DWindow: real implementation, see RT_InitImageFunctions (rt_image.mm).
 
 static void RT_DrawStretchPic2( float x, float y, float w, float h, float s1, float t1, float s2, float t2, float sx, float sy, qhandle_t hShader )
 {
@@ -130,10 +127,7 @@ static void RT_AddBox( float x, float y, float w, float h )
 	RT_STUB_ONCE();
 }
 
-static void RT_Scissor( int x, int y, int width, int height )
-{
-	RT_STUB_ONCE();
-}
+// Scissor: real implementation, see RT_InitImageFunctions (rt_image.mm).
 
 static void RT_DrawLineLoop( const vec2_t *points, int count, int stippleFactor, int stippleMask )
 {
@@ -477,8 +471,8 @@ void RT_InitStubs( refexport_t *re )
 	re->SetColor = RT_SetColor;
 	re->DrawStretchRaw = RT_DrawStretchRaw;
 	re->UploadCinematic = RT_UploadCinematic;
-	re->Set2DWindow = RT_Set2DWindow;
-	// DrawStretchPic: real implementation, see RT_InitImageFunctions.
+	// Set2DWindow/DrawStretchPic/Scissor: real implementations, see
+	// RT_InitImageFunctions.
 	re->DrawStretchPic2 = RT_DrawStretchPic2;
 	re->DrawTilePic = RT_DrawTilePic;
 	re->DrawTilePicOffset = RT_DrawTilePicOffset;
@@ -487,7 +481,6 @@ void RT_InitStubs( refexport_t *re )
 	re->DebugLine = RT_DebugLine;
 	re->DrawBox = RT_DrawBox;
 	re->AddBox = RT_AddBox;
-	re->Scissor = RT_Scissor;
 	re->DrawLineLoop = RT_DrawLineLoop;
 	re->Set2DInitialShaderTime = RT_Set2DInitialShaderTime;
 

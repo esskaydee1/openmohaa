@@ -195,6 +195,40 @@ Append one line per session: date, what shipped, what's next. Newest on top.
   curve tessellation (the 788 currently-skipped non-planar surfaces) are
   both still open.
 
+- 2026-09-07: Phase 1, session 5 shipped: real `Set2DWindow`/`Scissor`
+  (`rt_image.mm`), fixing the menu-layout bug session 4 found. Root
+  cause, traced directly in `code/uilib/uiwidget.cpp`: every UI widget
+  calls `Set2DWindow` once before drawing itself
+  (`UIWidget::set2D`, line 841) with its own screen-space viewport rect
+  and a local coordinate origin, then draws its background/hover art at
+  local `(0,0,width,height)` (line 1974 onward) - relying entirely on
+  that mapping to land at its real position. `DrawStretchPic` was
+  treating those local coordinates as absolute screen pixels, so every
+  widget's `(0,0)` was misread as the literal top-left corner - hence
+  every menu button drawing stacked in the same spot. Fixed by storing
+  the viewport+ortho state `Set2DWindow` establishes and remapping every
+  `DrawStretchPic` call's local coordinates through it
+  (`RT_MapLocalToScreen`) before the existing screen-to-NDC conversion;
+  defaults to an identity mapping (matching the real renderers' own
+  full-screen default, e.g. GL1's `RB_SetGL2D`) so anything drawn before
+  the first real `Set2DWindow` call behaves exactly as before. `Scissor`
+  is a real, clamped `setScissorRect:` call now too - implemented
+  alongside `Set2DWindow` since `UIWidget::set2D` always calls both
+  together, and Metal's scissor state resets automatically each frame
+  (a fresh encoder is created every `RE_BeginFrame`), so a widget's clip
+  rect from a UI frame can't leak into the next frame's 3D pass. No
+  regressions on world/entity/HUD rendering (compass, health bar all
+  correct on the training map). Visually confirmed live by the user: the
+  pause menu's "Back to Game" and "Quit" buttons, previously both
+  stacked in the same top-left spot, now render as two distinct buttons
+  in their own positions (top-left and top-right). Only `DrawStretchPic`
+  respects `Set2DWindow` so far - `DrawTilePic`/`DrawStretchPic2`/etc.
+  remain stubs, so any widget using `WF_TILESHADER` still won't draw
+  (loud stub warning, not silently broken). Next: real TIKI mesh parsing
+  (session 3's placeholder boxes), patch/curve tessellation (the 788
+  currently-skipped BSP surfaces), or extending the coordinate fix to
+  the other 2D draw calls are all still open.
+
 - 2026-09-07: Phase 1, session 3 shipped: a real 3D scene path.
   `RegisterModel`/`RegisterServerModel`/`SpawnEffectModel` (all three
   funnel through one shared registration helper, `rt_scene.mm`, matching

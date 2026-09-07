@@ -47,6 +47,49 @@ int numRtImages = 0;
 id<MTLRenderPipelineState> rtPipeline2D = nil;
 id<MTLSamplerState> rtSampler2D = nil;
 
+// Set by Set2DWindow, read by DrawStretchPic. uiwidget.cpp (UIWidget::set2D)
+// calls this once per widget with a viewport rect (vx/vy/vw/vh, real pixels,
+// Y-down from the top like the rest of this engine's 2D convention) and a
+// local coordinate origin (left/right/bottom/top) that widget's own
+// DrawStretchPic calls are expressed in - every widget draws itself at
+// local (0,0,width,height), relying entirely on this mapping to land at
+// its real screen position. Before this was implemented, every widget's
+// (0,0) was misread as absolute screen-pixel (0,0), so every menu button
+// drew stacked at the same spot instead of its own place in the layout.
+// Defaults to an identity mapping (matches the engine's own full-screen
+// default, e.g. GL1's RB_SetGL2D) so any draw call issued before the first
+// real Set2DWindow behaves exactly as it did before this existed.
+struct {
+	float vx, vy, vw, vh;
+	float left, right, bottom, top;
+} rt2DWindow = { 0, 0, 0, 0, 0, 0, 0, 0 };
+bool rt2DWindowInitialized = false;
+
+void RT_EnsureDefault2DWindow( void )
+{
+	if ( rt2DWindowInitialized )
+		return;
+	rt2DWindow.vx = 0.0f;
+	rt2DWindow.vy = 0.0f;
+	rt2DWindow.vw = (float)rtGlConfig.vidWidth;
+	rt2DWindow.vh = (float)rtGlConfig.vidHeight;
+	rt2DWindow.left = 0.0f;
+	rt2DWindow.right = (float)rtGlConfig.vidWidth;
+	rt2DWindow.top = 0.0f;
+	rt2DWindow.bottom = (float)rtGlConfig.vidHeight;
+	rt2DWindowInitialized = true;
+}
+
+void RT_MapLocalToScreen( float lx, float ly, float *outX, float *outY )
+{
+	float rangeX = rt2DWindow.right - rt2DWindow.left;
+	float rangeY = rt2DWindow.bottom - rt2DWindow.top;
+	float fracX = ( rangeX != 0.0f ) ? ( lx - rt2DWindow.left ) / rangeX : 0.0f;
+	float fracY = ( rangeY != 0.0f ) ? ( ly - rt2DWindow.top ) / rangeY : 0.0f;
+	*outX = rt2DWindow.vx + fracX * rt2DWindow.vw;
+	*outY = rt2DWindow.vy + fracY * rt2DWindow.vh;
+}
+
 const char *rtShaderSource2D =
 	"#include <metal_stdlib>\n"
 	"using namespace metal;\n"
@@ -246,6 +289,49 @@ static qhandle_t RT_RegisterShaderNoMip( const char *name )
 	return RT_RegisterImageCommon( name );
 }
 
+static void RT_Set2DWindow( int x, int y, int w, int h, float left, float right, float bottom, float top, float n, float f )
+{
+	rt2DWindow.vx = (float)x;
+	rt2DWindow.vy = (float)y;
+	rt2DWindow.vw = (float)w;
+	rt2DWindow.vh = (float)h;
+	rt2DWindow.left = left;
+	rt2DWindow.right = right;
+	rt2DWindow.bottom = bottom;
+	rt2DWindow.top = top;
+	rt2DWindowInitialized = true;
+	// n/f (near/far) are meaningless for this CPU-side 2D remap - depth
+	// testing is disabled for 2D draws (there's no depth attachment use
+	// in RT_DrawStretchPic), so they're accepted for ABI compatibility
+	// and otherwise unused, matching how little they do even in the real
+	// renderer's ortho matrix (z range for a surface that never varies
+	// in Z isn't visually meaningful).
+}
+
+static void RT_Scissor( int x, int y, int width, int height )
+{
+	id<MTLRenderCommandEncoder> encoder = RT_GetCurrentEncoder();
+	if ( encoder == nil )
+		return;
+
+	// Metal asserts if a scissor rect extends past the render target -
+	// clamp rather than let a widget's clip rect (computed against the
+	// engine's own vidWidth/vidHeight) crash on a rounding edge case.
+	int clampedX = ( x < 0 ) ? 0 : ( x > rtGlConfig.vidWidth ? rtGlConfig.vidWidth : x );
+	int clampedY = ( y < 0 ) ? 0 : ( y > rtGlConfig.vidHeight ? rtGlConfig.vidHeight : y );
+	int maxW = rtGlConfig.vidWidth - clampedX;
+	int maxH = rtGlConfig.vidHeight - clampedY;
+	int clampedW = ( width < 0 ) ? 0 : ( width > maxW ? maxW : width );
+	int clampedH = ( height < 0 ) ? 0 : ( height > maxH ? maxH : height );
+
+	MTLScissorRect rect;
+	rect.x = (NSUInteger)clampedX;
+	rect.y = (NSUInteger)clampedY;
+	rect.width = (NSUInteger)clampedW;
+	rect.height = (NSUInteger)clampedH;
+	[encoder setScissorRect:rect];
+}
+
 static void RT_DrawStretchPic( float x, float y, float w, float h,
 	float s1, float t1, float s2, float t2, qhandle_t hShader )
 {
@@ -261,14 +347,21 @@ static void RT_DrawStretchPic( float x, float y, float w, float h,
 
 	rtImage_t *img = &rtImages[hShader];
 
-	// x/y/w/h/s/t come in screen-pixel space with (0,0) at the top-left
-	// (the engine's usual 2D convention); project straight to Metal NDC
-	// on the CPU rather than carrying a projection matrix/uniform for
-	// this first pass.
-	float ndcX0 = ( x / rtGlConfig.vidWidth ) * 2.0f - 1.0f;
-	float ndcX1 = ( ( x + w ) / rtGlConfig.vidWidth ) * 2.0f - 1.0f;
-	float ndcY0 = 1.0f - ( y / rtGlConfig.vidHeight ) * 2.0f;
-	float ndcY1 = 1.0f - ( ( y + h ) / rtGlConfig.vidHeight ) * 2.0f;
+	// x/y/w/h/s/t come in the CURRENT Set2DWindow's local coordinate
+	// space, not raw screen pixels - uiwidget.cpp's widgets each call
+	// Set2DWindow with their own viewport+origin, then draw themselves
+	// at local (0,0,width,height) relying entirely on this mapping to
+	// land at their real position (see rt2DWindow's comment above).
+	RT_EnsureDefault2DWindow();
+
+	float screenX0, screenY0, screenX1, screenY1;
+	RT_MapLocalToScreen( x, y, &screenX0, &screenY0 );
+	RT_MapLocalToScreen( x + w, y + h, &screenX1, &screenY1 );
+
+	float ndcX0 = ( screenX0 / rtGlConfig.vidWidth ) * 2.0f - 1.0f;
+	float ndcX1 = ( screenX1 / rtGlConfig.vidWidth ) * 2.0f - 1.0f;
+	float ndcY0 = 1.0f - ( screenY0 / rtGlConfig.vidHeight ) * 2.0f;
+	float ndcY1 = 1.0f - ( screenY1 / rtGlConfig.vidHeight ) * 2.0f;
 
 	RTVertex2D verts[4] = {
 		{ { ndcX0, ndcY0 }, { s1, t1 } },
@@ -291,4 +384,6 @@ void RT_InitImageFunctions( refexport_t *re )
 	re->RegisterShader = RT_RegisterShader;
 	re->RegisterShaderNoMip = RT_RegisterShaderNoMip;
 	re->DrawStretchPic = RT_DrawStretchPic;
+	re->Set2DWindow = RT_Set2DWindow;
+	re->Scissor = RT_Scissor;
 }
