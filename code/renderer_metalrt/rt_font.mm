@@ -57,12 +57,21 @@ int numRtFonts = 0;
 // never NULL. Every indirection stays -1 (memset default, matching
 // "no glyph" - see below), so every character silently draws nothing
 // rather than crashing or drawing garbage.
+//
+// Deliberately its OWN small ring buffer, separate from rtFonts[]/
+// numRtFonts - a caller that already holds a pointer to a REAL,
+// successfully-parsed font (UIFont caches this permanently) must never
+// have that storage silently overwritten by an unrelated later parse
+// failure; keeping fallbacks in a disjoint array makes that impossible
+// rather than merely unlikely.
+rtFont_t rtFallbackFonts[8];
+int nextRtFallbackFont = 0;
+
 fontheader_t *RT_LoadFontFallback( const char *name )
 {
-	if ( numRtFonts >= MAX_RT_FONTS )
-		numRtFonts = 0; // wrap rather than fail - this path only needs to hand back *something* safe
+	rtFont_t *slot = &rtFallbackFonts[nextRtFallbackFont];
+	nextRtFallbackFont = ( nextRtFallbackFont + 1 ) % ARRAY_LEN( rtFallbackFonts );
 
-	rtFont_t *slot = &rtFonts[numRtFonts++];
 	Com_Memset( slot, 0, sizeof( *slot ) );
 	for ( int i = 0; i < 256; i++ )
 		slot->sgl.indirection[i] = -1;
