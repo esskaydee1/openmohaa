@@ -152,6 +152,44 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 3 shipped: a real 3D scene path.
+  `RegisterModel`/`RegisterServerModel`/`SpawnEffectModel` (all three
+  funnel through one shared registration helper, `rt_scene.mm`, matching
+  how `R_RegisterModelInternal` backs all three in the real renderer)
+  check that a named `.tik` file genuinely exists in the PK3-mounted
+  filesystem and hand back a real handle - no TIKI parsing yet, each
+  handle just means "draw a flat-magenta placeholder box," a deliberate
+  stand-in for real model geometry. `ClearScene`/`AddRefEntityToScene`/
+  `RenderScene` are real too: a proper view+projection matrix is built
+  from the `refdef_t` the game actually submits each frame
+  (`vieworg`/`viewaxis`/`fov_x`/`fov_y`), and every valid `RT_MODEL`
+  entity draws its placeholder box at the correct world position through
+  a new depth-tested 3D pipeline (added a `Depth32Float` texture/
+  `MTLDepthStencilState`, the first depth buffer this renderer has had).
+  Visually confirmed live via a temporary synthetic test box injected
+  directly in front of the camera (removed before this commit) - correct
+  perspective, correct depth compositing, correct 2D-HUD-over-3D-scene
+  ordering. Two real fixes along the way: (1) `ri.FS_FileExists` only
+  checks the loose homepath data directory, not PK3 archives (it's wired
+  to `FS_FileExists_HomeData` in `cl_main.cpp`) - `.tik` existence checks
+  need `FS_ReadFile(name, NULL)` instead, the same PK3-aware mechanism
+  the image loaders already use; (2) confirmed via `tr_main.c`'s
+  `R_RotateForViewer`/`s_flipMatrix` comment ("looking down X" ->
+  "looking down -Z") the exact camera axis convention:
+  `viewaxis[0]`=forward, `[1]`=left, `[2]`=up, used to derive the view
+  matrix from scratch for Metal. On real training-map content, 138
+  distinct `.tik` models registered successfully across all three entry
+  points, confirming the registration path handles real game data at
+  scale even though no single real entity happened to be in view during
+  headless testing (the ones that were had a genuinely unregistered
+  model - `models/fx/fx_fence_wood.tik` doesn't exist in this install).
+  Next: real TIKI parsing (read `code/tiki/`'s formats, replace the
+  placeholder box with actual mesh data - no skinning/animation yet,
+  just static geometry) is the natural next step now that registration
+  and scene submission are proven; alternatively, JPG/PNG image loading
+  (still open from session 2) or world/BSP rendering (`LoadWorld`) are
+  both still untouched and viable next sessions.
+
 - 2026-09-07: Phase 1, session 2 shipped: real `RegisterShader`/
   `RegisterShaderNoMip`/`DrawStretchPic` (`rt_image.mm`), visually
   confirmed live - a real menu button ("QUIT") loads and draws correctly,

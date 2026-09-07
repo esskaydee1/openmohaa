@@ -15,11 +15,8 @@ remove its assignment below.
 
 // ---- Registration ----
 
-static qhandle_t RT_RegisterModel( const char *name )
-{
-	RT_STUB_ONCE();
-	return 0;
-}
+// RegisterModel: real (placeholder-box) implementation, see
+// RT_InitSceneFunctions (rt_scene.mm).
 
 static qhandle_t RT_RegisterSkin( const char *name )
 {
@@ -39,15 +36,8 @@ static void RT_SetWorldVisData( const byte *vis )
 
 // ---- Scene submission ----
 
-static void RT_ClearScene( void )
-{
-	RT_STUB_ONCE();
-}
-
-static void RT_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumber )
-{
-	RT_STUB_ONCE();
-}
+// ClearScene/AddRefEntityToScene/RenderScene: real (placeholder-box)
+// implementations, see RT_InitSceneFunctions (rt_scene.mm).
 
 static qboolean RT_AddPolyToScene( qhandle_t hShader, int numVerts, const polyVert_t *verts, int num )
 {
@@ -67,11 +57,6 @@ static void RT_AddLightToScene( const vec3_t org, float intensity, float r, floa
 }
 
 static void RT_AddAdditiveLightToScene( const vec3_t org, float intensity, float r, float g, float b )
-{
-	RT_STUB_ONCE();
-}
-
-static void RT_RenderScene( const refdef_t *fd )
 {
 	RT_STUB_ONCE();
 }
@@ -379,17 +364,9 @@ static void RT_TakeVideoFrame( int h, int w, byte *captureBuffer, byte *encodeBu
 	RT_STUB_ONCE();
 }
 
-static qhandle_t RT_SpawnEffectModel( const char *name, vec3_t pos, vec3_t axis[3] )
-{
-	RT_STUB_ONCE();
-	return 0;
-}
-
-static qhandle_t RT_RegisterServerModel( const char *name )
-{
-	RT_STUB_ONCE();
-	return 0;
-}
+// SpawnEffectModel/RegisterServerModel: real implementations, see
+// RT_InitSceneFunctions (rt_scene.mm) - they share RegisterModel's
+// underlying registration logic, same as the real renderer.
 
 static void RT_UnregisterServerModel( qhandle_t model )
 {
@@ -482,20 +459,20 @@ static void RT_SetFullscreen( qboolean fullScreen )
 
 void RT_InitStubs( refexport_t *re )
 {
-	re->RegisterModel = RT_RegisterModel;
+	// RegisterModel: real implementation, see RT_InitSceneFunctions
+	// (rt_scene.mm), called separately below.
 	re->RegisterSkin = RT_RegisterSkin;
 	// RegisterShader/RegisterShaderNoMip: real implementations, see
 	// RT_InitImageFunctions (rt_image.mm), called separately below.
 	re->LoadWorld = RT_LoadWorld;
 	re->SetWorldVisData = RT_SetWorldVisData;
 
-	re->ClearScene = RT_ClearScene;
-	re->AddRefEntityToScene = RT_AddRefEntityToScene;
+	// ClearScene/AddRefEntityToScene/RenderScene: real implementations,
+	// see RT_InitSceneFunctions.
 	re->AddPolyToScene = RT_AddPolyToScene;
 	re->LightForPoint = RT_LightForPoint;
 	re->AddLightToScene = RT_AddLightToScene;
 	re->AddAdditiveLightToScene = RT_AddAdditiveLightToScene;
-	re->RenderScene = RT_RenderScene;
 	re->AddRefSpriteToScene = RT_AddRefSpriteToScene;
 	re->AddTerrainMarkToScene = RT_AddTerrainMarkToScene;
 
@@ -549,8 +526,8 @@ void RT_InitStubs( refexport_t *re )
 
 	re->RemapShader = RT_RemapShader;
 	re->TakeVideoFrame = RT_TakeVideoFrame;
-	re->SpawnEffectModel = RT_SpawnEffectModel;
-	re->RegisterServerModel = RT_RegisterServerModel;
+	// SpawnEffectModel/RegisterServerModel: real implementations, see
+	// RT_InitSceneFunctions.
 	re->UnregisterServerModel = RT_UnregisterServerModel;
 	re->RefreshShaderNoMip = RT_RefreshShaderNoMip;
 	re->FreeModels = RT_FreeModels;

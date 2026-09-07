@@ -22,6 +22,7 @@ include(renderer_common)
 set(RENDERER_METALRT_SOURCES
     ${SOURCE_DIR}/renderer_metalrt/rt_init.mm
     ${SOURCE_DIR}/renderer_metalrt/rt_image.mm
+    ${SOURCE_DIR}/renderer_metalrt/rt_scene.mm
     ${SOURCE_DIR}/renderer_metalrt/rt_stubs.cpp
     ${SOURCE_DIR}/renderercommon/tr_image_tga.c
     ${SOURCE_DIR}/renderercommon/tr_image_bmp.c

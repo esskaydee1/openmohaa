@@ -38,6 +38,11 @@ id<CAMetalDrawable> rtCurrentDrawable = nil;
 id<MTLCommandBuffer> rtCurrentCommandBuffer = nil;
 id<MTLRenderCommandEncoder> rtCurrentEncoder = nil;
 
+// Fixed-size depth buffer matching the initial window/drawable size (see
+// RT_INITIAL_WIDTH/HEIGHT below) - like real video-mode handling, resize
+// support is a follow-up session, not bundled into "add a depth buffer."
+id<MTLTexture> rtDepthTexture = nil;
+
 // Deliberately fixed for session 1 - real video-mode selection (r_mode,
 // r_fullscreen, custom resolution, matching sdl_glimp.c/sdl_metalimp.c's
 // mode-negotiation logic) is its own follow-up session, not bundled into
@@ -96,6 +101,14 @@ bool RT_InitWindowAndDevice( void )
 	SDL_Metal_GetDrawableSize( rtWindow, &drawableW, &drawableH );
 	rtLayer.drawableSize = CGSizeMake( drawableW, drawableH );
 
+	MTLTextureDescriptor *depthDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+	                                                                                       width:drawableW
+	                                                                                      height:drawableH
+	                                                                                   mipmapped:NO];
+	depthDesc.usage = MTLTextureUsageRenderTarget;
+	depthDesc.storageMode = MTLStorageModePrivate;
+	rtDepthTexture = [rtDevice newTextureWithDescriptor:depthDesc];
+
 	// Only show the window once the layer is fully configured (device,
 	// pixel format, drawable size) - matches the working order used
 	// earlier this session for the ANGLE-backed renderer_metal, rather
@@ -110,9 +123,9 @@ bool RT_InitWindowAndDevice( void )
 	rtGlConfig.vidHeight = RT_INITIAL_HEIGHT;
 	rtGlConfig.windowAspect = (float)RT_INITIAL_WIDTH / (float)RT_INITIAL_HEIGHT;
 	rtGlConfig.colorBits = 32;
-	// No depth/stencil buffer exists yet this session - report honestly
-	// rather than claim a buffer that isn't there.
-	rtGlConfig.depthBits = 0;
+	rtGlConfig.depthBits = 32; // MTLPixelFormatDepth32Float
+	// No stencil buffer exists yet - report honestly rather than claim
+	// one that isn't there.
 	rtGlConfig.stencilBits = 0;
 	rtGlConfig.driverType = GLDRV_ICD;
 	rtGlConfig.hardwareType = GLHW_GENERIC;
@@ -129,6 +142,7 @@ void RT_ShutdownWindowAndDevice( void )
 {
 	rtCurrentCommandBuffer = nil;
 	rtCurrentDrawable = nil;
+	rtDepthTexture = nil;
 
 	rtQueue = nil;
 	rtDevice = nil;
@@ -234,6 +248,11 @@ static void RE_BeginFrame( stereoFrame_t stereoFrame )
 	// Anything drawn this frame (DrawStretchPic etc.) paints over it.
 	pass.colorAttachments[0].clearColor = MTLClearColorMake( 0.0, 0.15, 0.2, 1.0 );
 
+	pass.depthAttachment.texture = rtDepthTexture;
+	pass.depthAttachment.loadAction = MTLLoadActionClear;
+	pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+	pass.depthAttachment.clearDepth = 1.0;
+
 	rtCurrentEncoder = [rtCurrentCommandBuffer renderCommandEncoderWithDescriptor:pass];
 }
 
@@ -268,6 +287,7 @@ static void RE_EndFrame( int *frontEndMsec, int *backEndMsec )
 // this file.
 void RT_InitStubs( refexport_t *re );
 void RT_InitImageFunctions( refexport_t *re );
+void RT_InitSceneFunctions( refexport_t *re );
 
 /*
 @@@@@@@@@@@@@@@@@@@@@
@@ -318,6 +338,9 @@ extern "C" refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp )
 
 	// Real image registration + 2D drawing (Phase 1 session 2).
 	RT_InitImageFunctions( &re );
+
+	// Real model registration + 3D scene submission (Phase 1 session 3).
+	RT_InitSceneFunctions( &re );
 
 	ri.Printf( PRINT_ALL, "----- finished renderer_metalrt R_Init -----\n" );
 
