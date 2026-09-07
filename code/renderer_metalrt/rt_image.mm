@@ -158,6 +158,109 @@ bool RT_EnsurePipeline2D( void )
 	return true;
 }
 
+// Session 8: resolves a shader NAME (e.g. "ranger_top") to a real
+// texture PATH (e.g. "textures/models/human/.../ranger_assaultvest.tga")
+// by scanning every scripts/*.shader file for a matching top-level
+// block, then scanning across ALL its stages (not just the first) for
+// the first map/clampmap argument that isn't one of the three special
+// non-file values ($whiteimage/$lightmap/$deluxemap) - some real world
+// shaders put $lightmap in the first stage and the real diffuse texture
+// in a later one (e.g. scripts/algiers.shader's lightplaster1: stage 1
+// is "map $lightmap", stage 2 is the real texture). Mirrors the real
+// renderer's FindShaderInShaderText + ParseStage's map/clampmap handling
+// (tr_shader.c), minus everything else a shader can specify (blend
+// modes, tcMod, rgbGen, sort, cull, deformVertexes, sky, fog...) - all
+// silently skipped by the tokenizer's own "not a brace, not what we're
+// looking for" fallthrough, which is correct parser behavior (not a
+// "no silent no-ops" violation - unrecognized keywords are normal, not
+// failures). Re-scans every .shader file per distinct miss rather than
+// keeping one persistent concatenated buffer like the real renderer's
+// startup-time ScanAndLoadShaderFiles - acceptable since
+// RT_RegisterImageCommon below already caches by name, so this only
+// ever runs once per distinct name actually requested, not per frame.
+bool RT_FindShaderScriptTexture( const char *shaderName, char *outPath, size_t outPathSize )
+{
+	int numFiles = 0;
+	char **fileList = ri.FS_ListFiles( "scripts", ".shader", &numFiles );
+	if ( fileList == NULL )
+		return false;
+
+	bool found = false;
+
+	for ( int f = 0; f < numFiles && !found; f++ )
+	{
+		char fullPath[MAX_QPATH];
+		Com_sprintf( fullPath, sizeof( fullPath ), "scripts/%s", fileList[f] );
+
+		byte *fileData = NULL;
+		long fileLen = ri.FS_ReadFile( fullPath, (void **)&fileData );
+		if ( fileLen <= 0 || fileData == NULL )
+			continue;
+
+		char *p = (char *)fileData;
+		while ( true )
+		{
+			char *token = COM_ParseExt( &p, qtrue );
+			if ( token[0] == '\0' )
+				break;
+
+			if ( Q_stricmp( token, shaderName ) != 0 )
+			{
+				SkipBracedSection( &p, 0 );
+				continue;
+			}
+
+			// Matched the shader block by name - the next token must be
+			// its opening brace; scan every stage inside for the first
+			// real texture reference.
+			char *openBrace = COM_ParseExt( &p, qtrue );
+			if ( Q_stricmp( openBrace, "{" ) != 0 )
+				break; // malformed shader block - give up on this file
+
+			int depth = 1;
+			while ( depth > 0 )
+			{
+				char *tok = COM_ParseExt( &p, qtrue );
+				if ( tok[0] == '\0' )
+					break;
+
+				if ( !Q_stricmp( tok, "{" ) )
+				{
+					depth++;
+					continue;
+				}
+				if ( !Q_stricmp( tok, "}" ) )
+				{
+					depth--;
+					continue;
+				}
+
+				if ( !Q_stricmp( tok, "map" ) || !Q_stricmpn( tok, "clampmap", 8 ) )
+				{
+					// Same-line only, matching ParseStage - a shader
+					// script never breaks a map/clampmap argument across
+					// lines.
+					char *arg = COM_ParseExt( &p, qfalse );
+					if ( arg[0] != '\0' && Q_stricmp( arg, "$whiteimage" ) != 0
+						&& Q_stricmp( arg, "$lightmap" ) != 0 && Q_stricmp( arg, "$deluxemap" ) != 0 )
+					{
+						Q_strncpyz( outPath, arg, outPathSize );
+						found = true;
+						break;
+					}
+				}
+			}
+
+			break; // done with this shader block, found a texture or not
+		}
+
+		ri.FS_FreeFile( fileData );
+	}
+
+	ri.FS_FreeFileList( fileList );
+	return found;
+}
+
 // RegisterShader treats its name as a direct image path, trying common
 // extensions in turn if the name doesn't already have one - the same
 // job R_LoadImage does in the existing renderers, minus DDS/S3TC (no
@@ -245,16 +348,34 @@ qhandle_t RT_RegisterImageCommon( const char *name )
 			return i;
 	}
 
+	// Real .shader script lookup first, matching R_FindShaderEx's own
+	// order (tr_shader.c) - only falls back to treating the name as a
+	// direct image file (the ONLY thing this function did before session
+	// 8) if no shader script defines it, same as the real renderer does
+	// for a name with no .shader entry at all.
+	char strippedName[MAX_QPATH];
+	COM_StripExtension( name, strippedName, sizeof( strippedName ) );
+
+	char resolvedPath[MAX_QPATH];
 	int width = 0, height = 0;
-	byte *pic = RT_LoadImageFile( name, &width, &height );
+	byte *pic = NULL;
+	if ( RT_FindShaderScriptTexture( strippedName, resolvedPath, sizeof( resolvedPath ) ) )
+		pic = RT_LoadImageFile( resolvedPath, &width, &height );
+
+	if ( pic == NULL )
+		pic = RT_LoadImageFile( name, &width, &height );
+
 	if ( pic == NULL )
 	{
-		// Honest limitation, not a bug: RegisterShader only understands
-		// direct image files this session, not .shader scripts. Warn
-		// once so a missing/mismatched name is visible, then hand back
-		// the invalid handle like a genuinely-missing image would.
-		ri.Printf( PRINT_WARNING, "renderer_metalrt: RegisterShader: couldn't load image for \"%s\" "
-			"(no .shader script support yet - see Phase 2)\n", name );
+		// Honest limitation, not a bug: only a shader script's first
+		// resolvable map/clampmap texture, or a direct image file, ever
+		// resolves - a shader that only uses generated/procedural stages
+		// (animMaps, videoMaps, $whiteimage-only stages, etc.) or a name
+		// that's neither a shader nor an image still won't. Warn once so
+		// a missing/mismatched name is visible, then hand back the
+		// invalid handle like a genuinely-missing image would.
+		ri.Printf( PRINT_WARNING, "renderer_metalrt: RegisterShader: couldn't resolve a texture for \"%s\" "
+			"(no shader script or direct image file matched)\n", name );
 		return 0;
 	}
 

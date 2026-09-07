@@ -152,6 +152,55 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 8 shipped: real `.shader` script parsing
+  (`RT_FindShaderScriptTexture`, `rt_image.mm`) - the gating dependency
+  session 7 identified for its texturing infrastructure to have any
+  visible effect. Reuses the tokenizer already linked into this
+  renderer's dylib for other reasons (`COM_ParseExt`/`SkipBracedSection`/
+  `COM_StripExtension`, from `code/qcommon/q_shared.c`, already compiled
+  in per `cmake/renderer_metalrt.cmake`) rather than writing a new one:
+  `ri.FS_ListFiles("scripts", ".shader", ...)` enumerates every shader
+  script (PK3-aware, same call the real renderer's own
+  `ScanAndLoadShaderFiles` makes), then for a requested shader name,
+  linearly scans each file's top-level tokens for a case-insensitive
+  name match (skipping non-matching blocks via `SkipBracedSection`,
+  mirroring the real renderer's `FindShaderInShaderText`), then scans
+  every stage inside the matched block - not just the first - for the
+  first `map`/`clampmap` argument that isn't one of the three special
+  non-file values (`$whiteimage`/`$lightmap`/`$deluxemap`). That
+  cross-stage scan matters: some real world shaders put `$lightmap` in
+  stage 1 and the actual diffuse texture in stage 2 (confirmed with a
+  real example, `scripts/algiers.shader`'s `lightplaster1`) - stopping
+  at the first stage's first `map` would silently resolve nothing for
+  those. `RT_RegisterImageCommon` now tries this lookup first and only
+  falls back to treating the name as a direct image file (the *only*
+  thing it did through session 7) if no shader script matches - the
+  same order the real renderer's `R_FindShaderEx` uses. Result on the
+  training map: 118 successful texture resolutions vs. 4 failures, up
+  from 32/175 in session 7 - and critically, this time real gameplay
+  content resolved correctly (`M2FragGrenade`, `colt`, `P38`, `Garand`,
+  `springfield`, `KAR98`, etc.), not just 2D UI textures. Visually
+  confirmed live via the same synthetic debug-entity method used in
+  sessions 6-7 (removed before committing) - a grenade model now shows
+  its own real, naturally-resolved M2FragGrenade texture (correct
+  fragmentation pattern, no manual forcing needed this time). Also
+  fixed, as a side effect of the same change: the radio pickup HUD icon
+  (`textures/hud/item_radio`, first noted failing back in session 4's
+  status log) now resolves and renders correctly too, confirmed live by
+  the user recognizing it on screen without prompting. Deliberately
+  narrow scope, matching the plan: only `map`/`clampmap` are understood;
+  everything else a shader can specify (blend modes, tcMod animation,
+  rgbGen, alphaFunc, sort, cull, deformVertexes, sky, fog, multiple
+  independently-blended stages) is silently skipped by the parser's own
+  token fallthrough - not a "no silent no-ops" violation, since skipping
+  unrecognized syntax is normal parser behavior, not a failure; it just
+  means every real texture still renders unlit/flat and un-blended
+  rather than with its actual intended look. Next: real lighting (the
+  natural next visual gap now that real geometry+textures both exist),
+  patch/curve tessellation (the 788 still-skipped BSP surfaces), or
+  broadening shader-stage support (blend modes for transparent/additive
+  surfaces, tcMod scroll/animation) are all still open.
+
 - 2026-09-07: Phase 1, session 7 shipped: real per-surface model
   texturing infrastructure. `RT_BakeTikiModel` (`rt_scene.mm`) now also
   bakes each vertex's `skeletorVertex_t::texCoords` into a parallel
