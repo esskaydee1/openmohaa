@@ -152,6 +152,45 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 7 shipped: real per-surface model
+  texturing infrastructure. `RT_BakeTikiModel` (`rt_scene.mm`) now also
+  bakes each vertex's `skeletorVertex_t::texCoords` into a parallel
+  texcoord buffer, and records one draw range (index offset/count) per
+  real mesh surface instead of merging a whole model into a single
+  draw. Each surface's texture is resolved by matching its baked name
+  (e.g. "ranger_top") against `dtiki_t::surfaces[]`'s TIKI-level
+  `surface <name> shader <name>` mappings from the .tik script - a
+  SEPARATE list from the mesh geometry surfaces, matched by name, the
+  same way the real renderer's `R_InitStaticModels` resolves shaders for
+  static props - then reuses `RT_RegisterImageCommon` (rt_image.mm,
+  moved out of its anonymous namespace so this file can call it) to try
+  loading it as a direct image file. A new textured pipeline
+  (`rt_vertex_3d_tex`/`rt_fragment_3d_tex`) samples a resolved texture
+  using the baked UVs; any surface with no resolvable texture keeps
+  using the original flat-magenta pipeline, per-surface, not per-model -
+  a model can legitimately mix both. On the training map: 32 direct
+  image loads succeeded, 175 failed - but *all 32 successes were 2D
+  UI/HUD textures*, zero from any of the 138 registered models' surfaces.
+  This is an honest, expected result, not a bug: real MoHAA model
+  materials are virtually all `.shader`-script references (multi-stage,
+  blend/animation effects), not bare image files, so this session's
+  infrastructure is real and correct but has no visible effect on actual
+  gameplay content yet - `.shader` script parsing (repeatedly deferred to
+  "Phase 2" since session 2) is the actual gating dependency for any
+  model to visibly render textured. Verified the textured pipeline
+  itself is genuinely correct anyway, via a temporary two-part
+  hack (removed before committing): forced `RT_ResolveSurfaceTexture` to
+  fall back to a known-loadable UI texture (`textures/hud/compassface`)
+  when normal resolution failed, and re-added session 6's synthetic
+  debug-entity injection (`m2fgrenade.tik`) - the result was a
+  correctly-oriented compass texture visibly wrapped around the real
+  grenade mesh shape, confirming UV baking, sampling, and compositing
+  all work correctly end to end. Next: `.shader` script parsing (the
+  real unlock for this session's work to have any visible payoff),
+  patch/curve tessellation (the 788 still-skipped BSP surfaces), or
+  extending session 5's `Set2DWindow` coordinate fix to the other 2D
+  draw calls are all still open.
+
 - 2026-09-07: Phase 1, session 6 shipped: real static TIKI mesh geometry,
   replacing every `RT_MODEL` entity's flat-magenta placeholder box with
   its actual mesh shape. Turns out this needed almost no new parsing

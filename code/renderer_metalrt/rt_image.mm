@@ -224,6 +224,16 @@ id<MTLTexture> RT_CreateTexture( const byte *rgba, int width, int height )
 	return texture;
 }
 
+} // namespace
+
+// Not anonymous-namespace-scoped: rt_scene.mm's session-7 model-texturing
+// bake step calls this directly (with a TIKI surface's shader name
+// instead of a UI DrawStretchPic image path) to reuse the same
+// direct-image-file loader rather than duplicating it. Still freely
+// calls the namespace-internal helpers above (rtImages/numRtImages/
+// RT_LoadImageFile/RT_EnsurePipeline2D/RT_CreateTexture) - anonymous
+// namespace members stay visible throughout this one file, just not to
+// other translation units.
 qhandle_t RT_RegisterImageCommon( const char *name )
 {
 	if ( !name || !name[0] )
@@ -277,7 +287,14 @@ qhandle_t RT_RegisterImageCommon( const char *name )
 	return numRtImages;
 }
 
-} // namespace
+// Same reasoning as RT_RegisterImageCommon above - rt_scene.mm needs the
+// actual MTLTexture for a resolved handle to bind it for a 3D draw call.
+id<MTLTexture> RT_GetImageTexture( qhandle_t handle )
+{
+	if ( handle <= 0 || handle > numRtImages )
+		return nil;
+	return rtImages[handle].texture;
+}
 
 static qhandle_t RT_RegisterShader( const char *name )
 {
