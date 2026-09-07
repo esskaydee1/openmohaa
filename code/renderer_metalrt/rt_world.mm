@@ -1,18 +1,18 @@
 /*
 ===========================================================================
 renderer_metalrt - Phase 1 session 4: real world/BSP geometry (LoadWorld).
+Session 11 adds MST_PATCH (curved surfaces - arches, pipes, rounded
+terrain detail).
 
-Deliberately scoped to the simplest real slice: MST_PLANAR surfaces only
-(ordinary brush faces - walls, floors, ceilings). MST_PATCH (curved
-surfaces), MST_TRIANGLE_SOUP, MST_TERRAIN, and MST_FLARE are real,
-separate work for a later session - skipped here, not silently dropped:
-see the surfaceType switch below. No textures, no lightmaps, no
-visibility culling (PVS) yet either - every planar surface in the map
-draws, every frame, as flat gray geometry through the same depth-tested
-3D pipeline entity placeholders use (rt_scene.mm). That's enough to
-prove the real BSP data (already in world space, no per-surface
-transform needed) reaches the screen correctly before any of the
-lighting/material/culling work on top of it.
+MST_TRIANGLE_SOUP, MST_TERRAIN, and MST_FLARE are still real, separate
+work for a later session - skipped here, not silently dropped: see the
+surfaceType switch below. No textures, no lightmaps, no visibility
+culling (PVS) yet either - every planar/patch surface in the map draws,
+every frame, as flat (session 10: lit) gray geometry through the same
+depth-tested 3D pipeline entity placeholders use (rt_scene.mm). That's
+enough to prove the real BSP data (already in world space, no
+per-surface transform needed) reaches the screen correctly before any
+of the material/culling work on top of it.
 ===========================================================================
 */
 #include "rt_local.h"
@@ -33,6 +33,120 @@ namespace {
 id<MTLBuffer> rtWorldVertexBuffer = nil;
 id<MTLBuffer> rtWorldNormalBuffer = nil;
 int rtWorldVertexCount = 0;
+
+// Session 11: MST_PATCH surfaces are control-point grids of overlapping
+// 3x3 biquadratic Bezier sub-patches (the classic idTech3 curved-surface
+// scheme - see code/renderergl2/tr_curve.c's R_SubdividePatchToGrid for
+// the real, LOD-adaptive version this deliberately simplifies). Real
+// LOD (view-distance-based subdivision, crack-prevention between
+// differently-tessellated neighbors) is real, separate work; this
+// tessellates every patch at one fixed resolution instead - correct
+// curved geometry, just not adaptive yet.
+const int RT_PATCH_TESSELLATION = 8;
+const int RT_MAX_PATCH_DIM = 64; // sanity bound against a malformed BSP, not a real engine limit
+
+// Evaluates one 3x3 biquadratic Bezier sub-patch at parametric (u,v) in
+// [0,1]^2 - standard De Casteljau-equivalent closed form, not the real
+// engine's iterative lerp-based PutPointsOnCurve (mathematically the
+// same curve, simpler to evaluate at an arbitrary fixed resolution
+// instead of the real engine's adaptive row/column insertion). Normal
+// is interpolated from the control points' own normals using the same
+// basis weights, rather than recomputed from the tessellated geometry
+// (MakeMeshNormals in the real engine) - a reasonable approximation for
+// a first pass, not exact for a highly curved patch.
+void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v, simd_float3 *outPos, simd_float3 *outNormal )
+{
+	float bu[3] = { ( 1.0f - u ) * ( 1.0f - u ), 2.0f * u * ( 1.0f - u ), u * u };
+	float bv[3] = { ( 1.0f - v ) * ( 1.0f - v ), 2.0f * v * ( 1.0f - v ), v * v };
+
+	simd_float3 pos = simd_make_float3( 0.0f, 0.0f, 0.0f );
+	simd_float3 normal = simd_make_float3( 0.0f, 0.0f, 0.0f );
+	for ( int j = 0; j < 3; j++ )
+	{
+		for ( int i = 0; i < 3; i++ )
+		{
+			float weight = bu[i] * bv[j];
+			const float *xyz = ctrl[j][i]->xyz;
+			const float *n = ctrl[j][i]->normal;
+			pos += weight * simd_make_float3( xyz[0], xyz[1], xyz[2] );
+			normal += weight * simd_make_float3( n[0], n[1], n[2] );
+		}
+	}
+
+	*outPos = pos;
+	float normalLen = simd_length( normal );
+	*outNormal = ( normalLen > 0.0001f ) ? ( normal / normalLen ) : simd_make_float3( 0.0f, 0.0f, 1.0f );
+}
+
+// Tessellates every 3x3 sub-patch of one MST_PATCH surface at a fixed
+// resolution and appends the result to the shared world vertex/normal
+// arrays - same flat, non-indexed triangle list as planar surfaces, so
+// no new pipeline/buffer/draw-call plumbing is needed.
+void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
+	std::vector<simd_float3> *outVerts, std::vector<simd_float3> *outNormals )
+{
+	int width = surf->patchWidth;
+	int height = surf->patchHeight;
+
+	// Real patches are always odd-sized (each pair of extra rows/columns
+	// beyond the first 3 shares an edge with the next 3x3 sub-patch) and
+	// at least 3x3 - anything else is a malformed surface, not a valid
+	// shape to tessellate.
+	if ( width < 3 || height < 3 || ( width % 2 ) == 0 || ( height % 2 ) == 0
+		|| width > RT_MAX_PATCH_DIM || height > RT_MAX_PATCH_DIM )
+		return;
+
+	if ( surf->numVerts != width * height )
+		return;
+
+	drawVert_t *ctrlPoints = allVerts + surf->firstVert;
+	int numPatchesX = ( width - 1 ) / 2;
+	int numPatchesY = ( height - 1 ) / 2;
+
+	simd_float3 gridPos[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
+	simd_float3 gridNorm[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
+
+	for ( int py = 0; py < numPatchesY; py++ )
+	{
+		for ( int px = 0; px < numPatchesX; px++ )
+		{
+			const drawVert_t *ctrl[3][3];
+			for ( int j = 0; j < 3; j++ )
+				for ( int k = 0; k < 3; k++ )
+					ctrl[j][k] = &ctrlPoints[( py * 2 + j ) * width + ( px * 2 + k )];
+
+			for ( int gv = 0; gv <= RT_PATCH_TESSELLATION; gv++ )
+			{
+				float v = (float)gv / (float)RT_PATCH_TESSELLATION;
+				for ( int gu = 0; gu <= RT_PATCH_TESSELLATION; gu++ )
+				{
+					float u = (float)gu / (float)RT_PATCH_TESSELLATION;
+					RT_EvalBezierPatch3x3( ctrl, u, v, &gridPos[gv][gu], &gridNorm[gv][gu] );
+				}
+			}
+
+			for ( int gv = 0; gv < RT_PATCH_TESSELLATION; gv++ )
+			{
+				for ( int gu = 0; gu < RT_PATCH_TESSELLATION; gu++ )
+				{
+					outVerts->push_back( gridPos[gv][gu] );
+					outVerts->push_back( gridPos[gv][gu + 1] );
+					outVerts->push_back( gridPos[gv + 1][gu + 1] );
+					outNormals->push_back( gridNorm[gv][gu] );
+					outNormals->push_back( gridNorm[gv][gu + 1] );
+					outNormals->push_back( gridNorm[gv + 1][gu + 1] );
+
+					outVerts->push_back( gridPos[gv][gu] );
+					outVerts->push_back( gridPos[gv + 1][gu + 1] );
+					outVerts->push_back( gridPos[gv + 1][gu] );
+					outNormals->push_back( gridNorm[gv][gu] );
+					outNormals->push_back( gridNorm[gv + 1][gu + 1] );
+					outNormals->push_back( gridNorm[gv + 1][gu] );
+				}
+			}
+		}
+	}
+}
 
 } // namespace
 
@@ -73,11 +187,15 @@ static void RT_LoadWorld( const char *name )
 	int *allIndexes = (int *)( fileData + indexLump->fileofs );
 
 	// Two passes, same shape as the real loader (tr_bsp.c R_LoadSurfaces):
-	// count first so the final buffer can be allocated exactly once,
-	// then fill it - simpler than a growable buffer for a one-shot,
-	// load-time operation.
+	// count first so the final buffer can be reserved close to its real
+	// size up front, then fill it - simpler than a growable buffer for a
+	// one-shot, load-time operation. (Patch surfaces still grow the
+	// vector dynamically past this reservation - their final vertex
+	// count depends on RT_PATCH_TESSELLATION, not worth a second exact
+	// pre-count for a load-time operation.)
 	int totalVerts = 0;
 	int numPlanarSurfaces = 0;
+	int numPatchSurfaces = 0;
 	int numSkippedSurfaces = 0;
 	for ( int i = 0; i < numSurfaces; i++ )
 	{
@@ -85,6 +203,10 @@ static void RT_LoadWorld( const char *name )
 		{
 			totalVerts += surfaces[i].numIndexes;
 			numPlanarSurfaces++;
+		}
+		else if ( surfaces[i].surfaceType == MST_PATCH )
+		{
+			numPatchSurfaces++;
 		}
 		else if ( surfaces[i].surfaceType != MST_BAD )
 		{
@@ -94,12 +216,12 @@ static void RT_LoadWorld( const char *name )
 
 	if ( numSkippedSurfaces > 0 )
 	{
-		ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar surfaces loaded, "
-			"%d non-planar surfaces (patches/triangle-soup/terrain/flares) skipped - not implemented yet\n",
-			name, numPlanarSurfaces, numSkippedSurfaces );
+		ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar, %d patch surfaces loaded, "
+			"%d other surfaces (triangle-soup/terrain/flares) skipped - not implemented yet\n",
+			name, numPlanarSurfaces, numPatchSurfaces, numSkippedSurfaces );
 	}
 
-	if ( totalVerts == 0 )
+	if ( totalVerts == 0 && numPatchSurfaces == 0 )
 	{
 		ri.FS_FreeFile( fileData );
 		return;
@@ -137,6 +259,12 @@ static void RT_LoadWorld( const char *name )
 		}
 	}
 
+	for ( int i = 0; i < numSurfaces; i++ )
+	{
+		if ( surfaces[i].surfaceType == MST_PATCH )
+			RT_TessellatePatchSurface( &surfaces[i], allVerts, &worldVerts, &worldNormals );
+	}
+
 	ri.FS_FreeFile( fileData );
 
 	if ( worldVerts.empty() )
@@ -153,8 +281,8 @@ static void RT_LoadWorld( const char *name )
 	                                                   length:worldNormals.size() * sizeof( simd_float3 )
 	                                                  options:MTLResourceStorageModeShared];
 
-	ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar surfaces, %d verts uploaded\n",
-		name, numPlanarSurfaces, rtWorldVertexCount );
+	ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar, %d patch surfaces, %d verts uploaded\n",
+		name, numPlanarSurfaces, numPatchSurfaces, rtWorldVertexCount );
 }
 
 void RT_DrawWorld( simd_float4x4 viewProj )

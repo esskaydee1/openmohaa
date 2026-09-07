@@ -152,6 +152,43 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 11 shipped: real MST_PATCH (curved
+  surface) tessellation, closing the largest remaining world-geometry
+  gap - 788 of the training map's surfaces (about 18% of the total)
+  were being skipped entirely since session 4. `RT_TessellatePatchSurface`
+  (`rt_world.mm`) implements the classic idTech3 curved-surface scheme:
+  a `patchWidth`x`patchHeight` control-point grid is really a set of
+  overlapping 3x3 biquadratic Bezier sub-patches (each pair of extra
+  rows/columns beyond the first 3 shares an edge with the next
+  sub-patch). `RT_EvalBezierPatch3x3` evaluates one sub-patch at
+  parametric (u,v) via the standard closed-form biquadratic basis
+  functions - a deliberate simplification of the real renderer's
+  `R_SubdividePatchToGrid` (`tr_curve.c`), which iteratively refines the
+  grid via LOD-adaptive row/column insertion instead; this tessellates
+  every patch at one fixed resolution (`RT_PATCH_TESSELLATION` = 8
+  subdivisions/edge) - mathematically the same curve, just not
+  view-distance-adaptive or crack-prevented against neighboring patches
+  at a different LOD yet. Per-vertex normals are interpolated from the
+  control points' own normals using the same Bezier basis weights,
+  rather than recomputed from the tessellated geometry
+  (`MakeMeshNormals` in the real engine) - a reasonable first-pass
+  approximation. Output is appended to the exact same flat,
+  non-indexed world vertex/normal arrays planar surfaces already use -
+  no new pipeline, buffer, or draw call needed. On the training map: all
+  788 patch surfaces tessellated successfully (627,255 total verts
+  uploaded, up from 32,055 planar-only). Visually confirmed live: a
+  road/path surface that previously rendered as a single flat, familiar
+  dark shape with no visible structure now shows real geometry with
+  correct receding perspective and edges, and a gate structure
+  previously invisible against the flat background is now clearly
+  visible. Stable for 4+ minutes, no crash, no regression to lighting,
+  texturing, or entity rendering. Next: real LOD-adaptive patch
+  subdivision (view-distance-based, crack prevention - this session's
+  fixed-resolution approach can show visible seams between adjacent
+  patches at very close range), real lighting derived from the map's
+  actual data (BSP lightgrid/light entities), broader `.shader` stage
+  support, or real `DrawString`/font rendering are all still open.
+
 - 2026-09-07: Phase 1, session 10 shipped: real per-vertex directional
   lighting for both world geometry and entities, replacing flat/uniform
   color everywhere. Honest scope: a single fixed "sun" direction
