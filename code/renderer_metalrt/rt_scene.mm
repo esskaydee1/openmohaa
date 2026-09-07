@@ -43,6 +43,10 @@ id<MTLDepthStencilState> rtDepthState3D = nil;
 id<MTLBuffer> rtBoxVertexBuffer = nil;
 int rtBoxVertexCount = 0;
 
+// Shared by both entity placeholders (magenta) and world geometry (gray,
+// see rt_world.mm) - same vertex function, one fragment color uniform
+// so both can reuse this one pipeline/depth state rather than each
+// needing their own.
 const char *rtShaderSource3D =
 	"#include <metal_stdlib>\n"
 	"using namespace metal;\n"
@@ -54,12 +58,16 @@ const char *rtShaderSource3D =
 	"    out.position = mvp * float4(positions[vertexID], 1.0);\n"
 	"    return out;\n"
 	"}\n"
-	"fragment float4 rt_fragment_3d(VertexOut in [[stage_in]]) {\n"
-	// Deliberately garish, unmissable placeholder color - this is a box
-	// standing in for a real model, not meant to be mistaken for one.
-	"    return float4(1.0, 0.0, 1.0, 1.0);\n"
+	"fragment float4 rt_fragment_3d(VertexOut in [[stage_in]],\n"
+	"    constant float4 &color [[buffer(0)]]) {\n"
+	"    return color;\n"
 	"}\n";
 
+} // namespace
+
+// Non-static so rt_world.mm can reuse the same pipeline/depth state
+// (world geometry and entity placeholders share both) rather than
+// standing up a second, near-identical copy.
 bool RT_EnsurePipeline3D( void )
 {
 	if ( rtPipeline3D != nil )
@@ -126,6 +134,16 @@ bool RT_EnsurePipeline3D( void )
 	return true;
 }
 
+id<MTLRenderPipelineState> RT_GetPipeline3D( void )
+{
+	return rtPipeline3D;
+}
+
+id<MTLDepthStencilState> RT_GetDepthState3D( void )
+{
+	return rtDepthState3D;
+}
+
 // See code/renderergl2/tr_main.c R_RotateForViewer's s_flipMatrix comment
 // ("convert from our coordinate system (looking down X) to OpenGL's
 // coordinate system (looking down -Z)") for the derivation this matches:
@@ -185,8 +203,6 @@ simd_float4x4 RT_BuildModelMatrix( const float origin[3], const float axis[3][3]
 	m.columns[3] = simd_make_float4( origin[0], origin[1], origin[2], 1 );
 	return m;
 }
-
-} // namespace
 
 // Shared by RegisterModel/RegisterServerModel/SpawnEffectModel - the real
 // renderer funnels all three through one R_RegisterModelInternal
@@ -317,11 +333,13 @@ static void RT_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
 		VectorCopy( re->axis[i], entity->axis[i] );
 }
 
+// rt_world.mm - reuses this file's shared 3D pipeline/depth state
+// (RT_GetPipeline3D/RT_GetDepthState3D/RT_EnsurePipeline3D) rather than
+// standing up a second, near-identical one for world geometry.
+void RT_DrawWorld( simd_float4x4 viewProj );
+
 static void RT_RenderScene( const refdef_t *fd )
 {
-	if ( numRtSceneEntities == 0 )
-		return;
-
 	if ( !RT_EnsurePipeline3D() )
 		return;
 
@@ -339,9 +357,22 @@ static void RT_RenderScene( const refdef_t *fd )
 	simd_float4x4 proj = RT_BuildProjectionMatrix( fd->fov_x, fd->fov_y, nearZ, farZ );
 	simd_float4x4 viewProj = simd_mul( proj, view );
 
+	// World geometry first (see rt_world.mm) - it's the background;
+	// entity placeholders draw on top of it, correctly depth-tested
+	// against it either way since both go through the same depth state.
+	RT_DrawWorld( viewProj );
+
+	if ( numRtSceneEntities == 0 )
+		return;
+
 	[encoder setRenderPipelineState:rtPipeline3D];
 	[encoder setDepthStencilState:rtDepthState3D];
 	[encoder setVertexBuffer:rtBoxVertexBuffer offset:0 atIndex:0];
+
+	// Deliberately garish, unmissable placeholder color - these boxes
+	// stand in for real models, not meant to be mistaken for one.
+	simd_float4 entityColor = simd_make_float4( 1.0f, 0.0f, 1.0f, 1.0f );
+	[encoder setFragmentBytes:&entityColor length:sizeof( entityColor ) atIndex:0];
 
 	for ( int i = 0; i < numRtSceneEntities; i++ )
 	{

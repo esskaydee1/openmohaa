@@ -135,11 +135,20 @@ bool RT_InitWindowAndDevice( void )
 	ri.Printf( PRINT_ALL, "renderer_metalrt: device \"%s\", window %dx%d, drawable %dx%d\n",
 		[rtDevice.name UTF8String], RT_INITIAL_WIDTH, RT_INITIAL_HEIGHT, drawableW, drawableH );
 
+	// sdl_glimp.c/sdl_metalimp.c both do this right after their window is
+	// ready - without it, sdl_input.c's SDL_window stays NULL and IN_Frame
+	// eventually dereferences it (crashes the first time gameplay actually
+	// reaches the mouse-focus check, not on frame 1 - see CLAUDE.md status
+	// log for how this was root-caused).
+	ri.IN_Init( rtWindow );
+
 	return true;
 }
 
 void RT_ShutdownWindowAndDevice( void )
 {
+	ri.IN_Shutdown();
+
 	rtCurrentCommandBuffer = nil;
 	rtCurrentDrawable = nil;
 	rtDepthTexture = nil;
@@ -288,6 +297,7 @@ static void RE_EndFrame( int *frontEndMsec, int *backEndMsec )
 void RT_InitStubs( refexport_t *re );
 void RT_InitImageFunctions( refexport_t *re );
 void RT_InitSceneFunctions( refexport_t *re );
+void RT_InitWorldFunctions( refexport_t *re );
 
 /*
 @@@@@@@@@@@@@@@@@@@@@
@@ -341,6 +351,9 @@ extern "C" refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp )
 
 	// Real model registration + 3D scene submission (Phase 1 session 3).
 	RT_InitSceneFunctions( &re );
+
+	// Real world/BSP geometry (Phase 1 session 4).
+	RT_InitWorldFunctions( &re );
 
 	ri.Printf( PRINT_ALL, "----- finished renderer_metalrt R_Init -----\n" );
 

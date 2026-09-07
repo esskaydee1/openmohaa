@@ -152,6 +152,49 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 4 shipped: real world/BSP geometry.
+  `LoadWorld` (`rt_world.mm`, new file) reads a `.bsp` via `ri.FS_ReadFile`,
+  validates `BSP_MIN_VERSION`/`BSP_MAX_VERSION`, walks `LUMP_SURFACES` via
+  `Q_GetLumpByVersion`, and uploads every `MST_PLANAR` surface's triangles
+  (indexed into the shared map-wide `LUMP_DRAWVERTS` array, already
+  world-space) into one `MTLBuffer`. Non-planar surface types (patches,
+  triangle soup, terrain, flares) are counted and logged as skipped, not
+  silently dropped. `RT_DrawWorld` reuses session 3's exact 3D pipeline/
+  depth-state (`RT_EnsurePipeline3D`, now exposed outside `rt_scene.mm`'s
+  anonymous namespace) with an identity model matrix and a flat gray
+  fragment color, drawn unconditionally before entities each frame. On
+  the training map: 3553 planar surfaces / 32055 verts loaded and
+  uploaded successfully; 788 non-planar surfaces correctly skipped.
+  Visually confirmed live - the user saw real geometry ("a blue road
+  going into the distance") matching the training map's actual layout.
+  One real, reproducible crash found and fixed along the way, unrelated
+  to world geometry itself: `renderer_metalrt` never called
+  `ri.IN_Init(window)` after creating its SDL window (both `sdl_glimp.c`
+  and `sdl_metalimp.c` do this for their renderers; this one never did,
+  since session 1 didn't know the input subsystem needed it). Effect:
+  `sdl_input.c`'s internal `SDL_window` stayed NULL forever, and
+  `IN_Frame` only actually dereferences it once gameplay reaches a fully
+  active, unpaused state (menu/loading states short-circuit before that
+  line) - hence a SIGABRT that reproduced 3/3 times but always at a
+  seemingly different, late point, not on frame 1. Fixed by adding the
+  matching `ri.IN_Init`/`ri.IN_Shutdown` calls to
+  `RT_InitWindowAndDevice`/`RT_ShutdownWindowAndDevice`; verified stable
+  for ~2 minutes past every previous crash point after the fix, with no
+  further backtraces. Also found, NOT fixed this session (separate,
+  pre-existing, 2D-UI scope from session 2): `Set2DWindow` is still a
+  loud stub (`rt_stubs.cpp`) - `DrawStretchPic` never picks up the
+  viewport/ortho window it's supposed to establish, so every menu
+  element draws through the same fixed full-window transform instead of
+  its own position. Visible symptom: hovering different main-menu/pause-
+  menu buttons shows each one stacked in the same wrong spot (top-left)
+  instead of spread across the screen. Next: implement `Set2DWindow`
+  properly (real fix for the menu-layout bug above - likely the more
+  valuable pick, since it blocks reading any menu that isn't a single
+  full-screen button); alternatively, real TIKI mesh parsing (replace
+  session 3's placeholder boxes with actual model geometry) or patch/
+  curve tessellation (the 788 currently-skipped non-planar surfaces) are
+  both still open.
+
 - 2026-09-07: Phase 1, session 3 shipped: a real 3D scene path.
   `RegisterModel`/`RegisterServerModel`/`SpawnEffectModel` (all three
   funnel through one shared registration helper, `rt_scene.mm`, matching

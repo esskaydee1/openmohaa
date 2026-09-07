@@ -8,6 +8,7 @@ See code/renderer_metalrt/CLAUDE.md and docs/ for scope and hard rules.
 #define __RT_LOCAL_H
 
 #include "../qcommon/q_shared.h"
+#include "../qcommon/qfiles.h"
 #include "../renderercommon/tr_public.h"
 
 // Deliberately does NOT include tr_common.h/qgl.h - this renderer never

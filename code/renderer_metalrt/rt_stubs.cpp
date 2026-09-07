@@ -24,10 +24,7 @@ static qhandle_t RT_RegisterSkin( const char *name )
 	return 0;
 }
 
-static void RT_LoadWorld( const char *name )
-{
-	RT_STUB_ONCE();
-}
+// LoadWorld: real implementation, see RT_InitWorldFunctions (rt_world.mm).
 
 static void RT_SetWorldVisData( const byte *vis )
 {
@@ -464,7 +461,8 @@ void RT_InitStubs( refexport_t *re )
 	re->RegisterSkin = RT_RegisterSkin;
 	// RegisterShader/RegisterShaderNoMip: real implementations, see
 	// RT_InitImageFunctions (rt_image.mm), called separately below.
-	re->LoadWorld = RT_LoadWorld;
+	// LoadWorld: real implementation, see RT_InitWorldFunctions
+	// (rt_world.mm), called separately below.
 	re->SetWorldVisData = RT_SetWorldVisData;
 
 	// ClearScene/AddRefEntityToScene/RenderScene: real implementations,
