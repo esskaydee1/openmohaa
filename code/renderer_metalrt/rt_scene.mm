@@ -18,11 +18,19 @@ through a real camera built from the refdef_t the game actually submits
 
 #include <math.h>
 #include <simd/simd.h>
+#include <vector>
 
 namespace {
 
 struct rtModel_t {
 	char name[MAX_QPATH];
+	// Real baked TIKI geometry (session 6) - nil/0 means "bake failed or
+	// this model has no mesh data", in which case RT_RenderScene falls
+	// back to the flat-magenta placeholder box, same as every model drew
+	// before this session.
+	id<MTLBuffer> vertexBuffer;
+	id<MTLBuffer> indexBuffer;
+	int indexCount;
 };
 
 #define MAX_RT_MODELS 1024
@@ -32,6 +40,7 @@ int numRtModels = 0;
 struct rtSceneEntity_t {
 	float origin[3];
 	float axis[3][3];
+	qhandle_t hModel;
 };
 
 #define MAX_RT_SCENE_ENTITIES 1024
@@ -204,10 +213,113 @@ simd_float4x4 RT_BuildModelMatrix( const float origin[3], const float axis[3][3]
 	return m;
 }
 
+// Bakes a dtiki_t's mesh data into one flat position-only vertex+index
+// buffer, in the model's idle/frame-0 pose - no runtime skinning, no
+// per-frame animation, matching the real renderer's own R_InitStaticModels
+// (code/renderergl2/tr_staticmodels.cpp), which does the same one-time
+// bake for non-animating map props. That function only reads each
+// vertex's FIRST bone weight, which is only correct when a vertex has a
+// single 1.0-weight bone (true for most static-prop meshes, wrong for
+// anything smoothly multi-weighted); this sums over every weight instead,
+// matching the fully-correct animated path's SkelWeightGetXyz
+// (tr_model.cpp) - the small extra loop costs nothing at load time.
+//
+// No normals/UVs baked yet - the existing 3D pipeline (RT_EnsurePipeline3D)
+// has no lighting or texturing, just a flat per-draw-call fragment color,
+// so there's nothing to feed them to yet. Revisit once 3D texturing exists.
+static void RT_BakeTikiModel( dtiki_t *tiki, rtModel_t *model )
+{
+	model->vertexBuffer = nil;
+	model->indexBuffer = nil;
+	model->indexCount = 0;
+
+	if ( tiki == NULL || tiki->numMeshes <= 0 )
+		return;
+
+	skelBoneCache_t bones[128];
+	float radius;
+	vec3_t mins, maxs;
+	ri.TIKI_GetSkelAnimFrame( tiki, bones, &radius, &mins, &maxs );
+
+	std::vector<simd_float3> verts;
+	std::vector<uint32_t> indices;
+
+	for ( int meshIndex = 0; meshIndex < tiki->numMeshes; meshIndex++ )
+	{
+		skelHeaderGame_t *skelmodel = ri.TIKI_GetSkel( tiki->mesh[meshIndex] );
+		if ( skelmodel == NULL )
+			continue;
+
+		skelSurfaceGame_t *surf = skelmodel->pSurfaces;
+		for ( int s = 0; s < skelmodel->numSurfaces && surf != NULL; s++, surf = surf->pNext )
+		{
+			int baseVertex = (int)verts.size();
+			skeletorVertex_t *vert = surf->pVerts;
+
+			for ( int v = 0; v < surf->numVerts; v++ )
+			{
+				skelWeight_t *weight = (skelWeight_t *)( (byte *)vert + sizeof( skeletorVertex_t )
+					+ vert->numMorphs * sizeof( skeletorMorph_t ) );
+
+				vec3_t out = { 0.0f, 0.0f, 0.0f };
+				for ( int w = 0; w < vert->numWeights; w++ )
+				{
+					// Multiple meshes in one TIKI can share a skeleton
+					// via a channel indirection rather than a direct
+					// bone index - mesh 0 doesn't need it, matching
+					// R_InitStaticModels' identical branch.
+					int boneNum;
+					if ( meshIndex > 0 )
+					{
+						int channel = skelmodel->pBones[weight->boneIndex].channel;
+						boneNum = ri.TIKI_GetLocalChannel( tiki, channel );
+					}
+					else
+					{
+						boneNum = weight->boneIndex;
+					}
+
+					skelBoneCache_t *bone = &bones[boneNum];
+					out[0] += ( ( weight->offset[0] * bone->matrix[0][0] + weight->offset[1] * bone->matrix[1][0]
+						+ weight->offset[2] * bone->matrix[2][0] ) + bone->offset[0] ) * weight->boneWeight;
+					out[1] += ( ( weight->offset[0] * bone->matrix[0][1] + weight->offset[1] * bone->matrix[1][1]
+						+ weight->offset[2] * bone->matrix[2][1] ) + bone->offset[1] ) * weight->boneWeight;
+					out[2] += ( ( weight->offset[0] * bone->matrix[0][2] + weight->offset[1] * bone->matrix[1][2]
+						+ weight->offset[2] * bone->matrix[2][2] ) + bone->offset[2] ) * weight->boneWeight;
+
+					weight++;
+				}
+
+				verts.push_back( simd_make_float3(
+					out[0] * tiki->load_scale, out[1] * tiki->load_scale, out[2] * tiki->load_scale ) );
+
+				vert = (skeletorVertex_t *)( (byte *)vert + sizeof( skeletorVertex_t )
+					+ sizeof( skeletorMorph_t ) * vert->numMorphs
+					+ sizeof( skelWeight_t ) * vert->numWeights );
+			}
+
+			skelIndex_t *tri = surf->pTriangles;
+			for ( int t = 0; t < surf->numTriangles * 3; t++ )
+				indices.push_back( (uint32_t)( baseVertex + tri[t] ) );
+		}
+	}
+
+	if ( verts.empty() || indices.empty() )
+		return;
+
+	model->vertexBuffer = [RT_GetDevice() newBufferWithBytes:verts.data()
+	                                                    length:verts.size() * sizeof( simd_float3 )
+	                                                   options:MTLResourceStorageModeShared];
+	model->indexBuffer = [RT_GetDevice() newBufferWithBytes:indices.data()
+	                                                   length:indices.size() * sizeof( uint32_t )
+	                                                  options:MTLResourceStorageModeShared];
+	model->indexCount = (int)indices.size();
+}
+
 // Shared by RegisterModel/RegisterServerModel/SpawnEffectModel - the real
 // renderer funnels all three through one R_RegisterModelInternal
-// (tr_model.cpp) for the same reason: it's the identical ".tik exists?"
-// registration contract, just reached from different game-code contexts
+// (tr_model.cpp) for the same reason: it's the identical registration
+// contract, just reached from different game-code contexts
 // (client-registered vs. server-preloaded vs. a one-shot effect that
 // registers-and-spawns in the same call).
 static qhandle_t RT_RegisterModelInternal( const char *name )
@@ -227,21 +339,20 @@ static qhandle_t RT_RegisterModelInternal( const char *name )
 		// Sprites (.spr) and anything else real content uses are a
 		// separate, later session - see tr_model.cpp's real dispatch
 		// (".spr" -> MOD_SPRITE, ".tik" -> MOD_TIKI) for the actual
-		// scope once this needs to grow beyond TIKI placeholders.
+		// scope once this needs to grow beyond TIKI models.
 		RT_STUB_ONCE();
 		return 0;
 	}
 
-	// ri.FS_FileExists only checks the loose homepath data directory, not
-	// the PK3-mounted virtual filesystem where real game assets actually
-	// live (it's wired to FS_FileExists_HomeData in cl_main.cpp) - which
-	// is why every real .tik in a pk3 would otherwise show as "not
-	// found". FS_ReadFile(name, NULL) is the actual PK3-aware existence
-	// check (returns -1 if missing, the file's length otherwise without
-	// reading it) - the same mechanism the image loaders already use.
-	if ( ri.FS_ReadFile( name, NULL ) < 0 )
+	// ri.TIKI_RegisterTikiFlags is the same client-side entry point the
+	// real renderer's R_RegisterModelInternal uses - a full text .tik +
+	// binary .skd parse (PK3-aware; it's backed by the same FS_ReadFile
+	// this file used to call directly for a bare existence check before
+	// this session). Returns NULL on any parse/file failure.
+	dtiki_t *tiki = ri.TIKI_RegisterTikiFlags( name, qfalse );
+	if ( tiki == NULL )
 	{
-		ri.Printf( PRINT_WARNING, "renderer_metalrt: RegisterModel: \"%s\" not found\n", name );
+		ri.Printf( PRINT_WARNING, "renderer_metalrt: RegisterModel: \"%s\" failed to load\n", name );
 		return 0;
 	}
 
@@ -253,10 +364,20 @@ static qhandle_t RT_RegisterModelInternal( const char *name )
 	}
 
 	numRtModels++;
-	Q_strncpyz( rtModels[numRtModels].name, name, sizeof( rtModels[numRtModels].name ) );
+	rtModel_t *model = &rtModels[numRtModels];
+	Q_strncpyz( model->name, name, sizeof( model->name ) );
+	RT_BakeTikiModel( tiki, model );
 
-	ri.Printf( PRINT_DEVELOPER, "renderer_metalrt: registered model \"%s\" -> handle %d "
-		"(placeholder box - no real TIKI loading yet)\n", name, numRtModels );
+	if ( model->vertexBuffer != nil )
+	{
+		ri.Printf( PRINT_DEVELOPER, "renderer_metalrt: registered model \"%s\" -> handle %d "
+			"(%d real indices baked)\n", name, numRtModels, model->indexCount );
+	}
+	else
+	{
+		ri.Printf( PRINT_DEVELOPER, "renderer_metalrt: registered model \"%s\" -> handle %d "
+			"(placeholder box - no mesh data to bake)\n", name, numRtModels );
+	}
 
 	return numRtModels;
 }
@@ -295,6 +416,7 @@ static qhandle_t RT_SpawnEffectModel( const char *name, vec3_t pos, vec3_t axis[
 		{
 			AxisClear( entity->axis );
 		}
+		entity->hModel = handle;
 	}
 
 	return handle;
@@ -331,6 +453,7 @@ static void RT_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
 	VectorCopy( re->origin, entity->origin );
 	for ( int i = 0; i < 3; i++ )
 		VectorCopy( re->axis[i], entity->axis[i] );
+	entity->hModel = re->hModel;
 }
 
 // rt_world.mm - reuses this file's shared 3D pipeline/depth state
@@ -367,10 +490,12 @@ static void RT_RenderScene( const refdef_t *fd )
 
 	[encoder setRenderPipelineState:rtPipeline3D];
 	[encoder setDepthStencilState:rtDepthState3D];
-	[encoder setVertexBuffer:rtBoxVertexBuffer offset:0 atIndex:0];
 
-	// Deliberately garish, unmissable placeholder color - these boxes
-	// stand in for real models, not meant to be mistaken for one.
+	// Deliberately garish, unmissable placeholder color - reused for real
+	// baked geometry too for now (no per-surface shader/texture lookup
+	// yet, see rt_image.mm's session-2 note on .shader script support),
+	// so a real model's silhouette is visible but not meant to be
+	// mistaken for final art.
 	simd_float4 entityColor = simd_make_float4( 1.0f, 0.0f, 1.0f, 1.0f );
 	[encoder setFragmentBytes:&entityColor length:sizeof( entityColor ) atIndex:0];
 
@@ -378,9 +503,25 @@ static void RT_RenderScene( const refdef_t *fd )
 	{
 		simd_float4x4 model = RT_BuildModelMatrix( rtSceneEntities[i].origin, rtSceneEntities[i].axis );
 		simd_float4x4 mvp = simd_mul( viewProj, model );
-
 		[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
-		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:rtBoxVertexCount];
+
+		qhandle_t hModel = rtSceneEntities[i].hModel;
+		rtModel_t *m = ( hModel >= 1 && hModel <= numRtModels ) ? &rtModels[hModel] : NULL;
+
+		if ( m != NULL && m->vertexBuffer != nil && m->indexBuffer != nil && m->indexCount > 0 )
+		{
+			[encoder setVertexBuffer:m->vertexBuffer offset:0 atIndex:0];
+			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+			                     indexCount:m->indexCount
+			                      indexType:MTLIndexTypeUInt32
+			                    indexBuffer:m->indexBuffer
+			              indexBufferOffset:0];
+		}
+		else
+		{
+			[encoder setVertexBuffer:rtBoxVertexBuffer offset:0 atIndex:0];
+			[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:rtBoxVertexCount];
+		}
 	}
 }
 

@@ -152,6 +152,46 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 6 shipped: real static TIKI mesh geometry,
+  replacing every `RT_MODEL` entity's flat-magenta placeholder box with
+  its actual mesh shape. Turns out this needed almost no new parsing
+  code: `code/tiki/`'s full text-`.tik` + binary-`.skd` parser is already
+  reachable through `refimport_t` (`ri.TIKI_RegisterTikiFlags`,
+  `ri.TIKI_GetSkel`, `ri.TIKI_GetSkelAnimFrame`, `ri.TIKI_GetLocalChannel`)
+  - the same import table this renderer already uses for
+  `ri.FS_ReadFile`. `RT_RegisterModelInternal` now calls
+  `ri.TIKI_RegisterTikiFlags` (replacing the old bare existence check)
+  and, on success, bakes every mesh/surface's vertices into one flat
+  position-only vertex+index buffer via `RT_BakeTikiModel` (`rt_scene.mm`):
+  walk the variable-stride `skeletorVertex_t`+weights chain per vertex,
+  transform each weight's bone-relative offset by a `skelBoneCache_t`
+  from one `ri.TIKI_GetSkelAnimFrame` call (idle/frame-0 pose - no
+  runtime skinning, matching the real renderer's own `R_InitStaticModels`
+  for non-animating props), and sum over *every* weight rather than only
+  the first (the real `R_InitStaticModels` takes that shortcut, correct
+  only for single-weight vertices - ported the fully-correct summed
+  version from the animated path's `SkelWeightGetXyz` instead, at
+  effectively no extra cost since this only runs once per model at
+  registration). No normals/UVs baked yet - the 3D pipeline has no
+  lighting or texturing to feed them to (still one flat fragment color
+  per draw call, same as the box it replaces). On the training map, all
+  138 registered models baked real geometry with zero placeholder-box
+  fallbacks. Visually confirmed live via the same temporary-injection
+  method session 3 used (a synthetic entity referencing a real baked
+  handle, removed before committing): first tried a weapon viewmodel
+  (`colt45.tik`) and it rendered "upside down" - turned out to be the
+  wrong test subject, not a bug, since viewmodels are authored for
+  hand-bone attachment with additional transforms this renderer doesn't
+  apply yet, not for free-standing display. Switched to a world/pickup
+  model (`models/projectiles/m2fgrenade.tik`) and got a correctly-shaped,
+  correctly-oriented grenade sitting on the terrain. Next: real per-model
+  texturing (resolve each surface's shader name to a registered image
+  and add UV output/texture sampling to the 3D pipeline - currently every
+  real mesh still draws in the same flat magenta as the box it replaced),
+  patch/curve tessellation (the 788 still-skipped BSP surfaces), or
+  extending session 5's `Set2DWindow` coordinate fix to the other 2D draw
+  calls (`DrawTilePic`/`DrawStretchPic2`/etc.) are all still open.
+
 - 2026-09-07: Phase 1, session 4 shipped: real world/BSP geometry.
   `LoadWorld` (`rt_world.mm`, new file) reads a `.bsp` via `ri.FS_ReadFile`,
   validates `BSP_MIN_VERSION`/`BSP_MAX_VERSION`, walks `LUMP_SURFACES` via
