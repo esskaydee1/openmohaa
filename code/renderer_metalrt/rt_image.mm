@@ -492,7 +492,12 @@ static void RT_Scissor( int x, int y, int width, int height )
 	[encoder setScissorRect:rect];
 }
 
-static void RT_DrawStretchPic( float x, float y, float w, float h,
+// Not static: rt_font.mm (session 12) calls this directly, once per
+// glyph, to draw each character's quad - text rendering is "the same
+// textured-quad draw DrawStretchPic already does, just looped," so it
+// reuses this exact function rather than duplicating the local-to-screen
+// mapping/pipeline/encoding logic a second time.
+void RT_DrawStretchPic( float x, float y, float w, float h,
 	float s1, float t1, float s2, float t2, qhandle_t hShader )
 {
 	id<MTLRenderCommandEncoder> encoder = RT_GetCurrentEncoder();

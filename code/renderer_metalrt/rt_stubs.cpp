@@ -271,62 +271,8 @@ static void RT_FreeRawImage( byte *pic )
 
 // ---- Fonts / swipe ----
 
-static void RT_DrawString( fontheader_t *font, const char *text, float x, float y, int maxLen, const float *pvVirtualScreen )
-{
-	RT_STUB_ONCE();
-}
-
-static float RT_GetFontHeight( const fontheader_t *font )
-{
-	RT_STUB_ONCE();
-	return 0.0f;
-}
-
-static float RT_GetFontStringWidth( const fontheader_t *font, const char *string )
-{
-	RT_STUB_ONCE();
-	return 0.0f;
-}
-
-static fontheader_t *RT_LoadFont( const char *name )
-{
-	RT_STUB_ONCE();
-
-	// UIFont's constructor (code/uilib/uifont.cpp) treats a NULL LoadFont
-	// result as a hard Sys_Error(ERR_DROP) - the UI can't even construct
-	// its default font object without one. Worse, UIFont::getCharWidth
-	// and ::getHeight read the fontheader_t's internals DIRECTLY (they
-	// don't go through GetFontStringWidth/GetFontHeight at all), taking
-	// the "numPages == 0" branch straight to m_font->sgl[0]->indirection[ch]
-	// - so a merely-non-NULL-but-otherwise-empty fontheader_t still
-	// segfaults (sgl[0] is NULL) the moment any UI text measures itself,
-	// which happens unavoidably during startup (View3D::InitSubtitle).
-	// Hand back a font with one real (if degenerate) page: numPages left
-	// at 0 so callers take that same sgl[0] branch, but sgl[0] now points
-	// at a zeroed page, so every glyph resolves to a valid, zero-sized
-	// location instead of dereferencing NULL - invisible text, not a
-	// crash. DrawString remains a real stub; nothing here actually
-	// renders a glyph. Replace this once real font loading exists.
-	static fontheader_sgl_t placeholderPages[8];
-	static fontheader_t placeholderFonts[8];
-	static int nextPlaceholder = 0;
-
-	int slot = nextPlaceholder % ARRAY_LEN( placeholderFonts );
-	nextPlaceholder++;
-
-	fontheader_sgl_t *page = &placeholderPages[slot];
-	Com_Memset( page, 0, sizeof( *page ) );
-	Q_strncpyz( page->name, name, sizeof( page->name ) );
-	page->height = 16.0f;
-	page->aspectRatio = 1.0f;
-
-	fontheader_t *font = &placeholderFonts[slot];
-	Com_Memset( font, 0, sizeof( *font ) );
-	Q_strncpyz( font->name, name, sizeof( font->name ) );
-	font->sgl[0] = page;
-
-	return font;
-}
+// LoadFont/DrawString/GetFontHeight/GetFontStringWidth: real
+// implementations, see RT_InitFontFunctions (rt_font.mm).
 
 static void RT_SwipeBegin( float thisTime, float life, qhandle_t hShader )
 {
@@ -507,10 +453,8 @@ void RT_InitStubs( refexport_t *re )
 	re->LoadRawImage = RT_LoadRawImage;
 	re->FreeRawImage = RT_FreeRawImage;
 
-	re->DrawString = RT_DrawString;
-	re->GetFontHeight = RT_GetFontHeight;
-	re->GetFontStringWidth = RT_GetFontStringWidth;
-	re->LoadFont = RT_LoadFont;
+	// LoadFont/DrawString/GetFontHeight/GetFontStringWidth: real
+	// implementations, see RT_InitFontFunctions (rt_font.mm).
 	re->SwipeBegin = RT_SwipeBegin;
 	re->SwipePoint = RT_SwipePoint;
 	re->SwipeEnd = RT_SwipeEnd;

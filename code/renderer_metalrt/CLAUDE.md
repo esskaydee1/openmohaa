@@ -152,6 +152,45 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 12 shipped: real font loading and text
+  rendering (`LoadFont`/`DrawString`/`GetFontHeight`/`GetFontStringWidth`,
+  new `rt_font.mm`), replacing the session-1 crash-safe-but-invisible
+  stub. MOHAA's simple fonts are plain-text `fonts/<name>.RitualFont`
+  files - parsed with the same `COM_Parse` tokenizer already linked in
+  for `.shader` scripts (session 8): a height, an aspect ratio, a
+  256-entry `indirection` table (character code -> glyph slot, -1 = no
+  glyph), and a 256-entry `locations` table of normalized UV rects into
+  one shared glyph-atlas texture named `gfx/fonts/<name>` - resolved
+  through the exact same `RT_RegisterImageCommon`/`.shader` pipeline any
+  other image name goes through. `DrawString` draws each glyph by
+  calling the already-proven `RT_DrawStretchPic` once per character
+  (exposed non-`static` for this) - text rendering is genuinely just
+  "the same textured-quad draw, looped," so it reuses that function's
+  entire pipeline/Set2DWindow-mapping/encoding logic rather than
+  duplicating any of it. Ported byte-for-byte from the real renderer's
+  `R_LoadFont_sgl`/`R_DrawString_sgl`/`R_GetFontStringWidth_sgl`
+  (`tr_font.cpp`), including the `pvVirtualScreen` scaling path. Scoped
+  to the common case only (`fontheader_t::numPages == 0`, a single sgl
+  page) - matches the real renderer's own dispatch; multi-page/CJK
+  fonts (rarer, real, separate work) still get a safe, glyph-empty
+  fallback rather than crashing. On the training map: 4 real fonts
+  parsed successfully (`verdana-14`, `verdana-12`, `marlett`,
+  `facfont-20`, all with plausible height/aspect values), each
+  resolving a real glyph-atlas texture; `DrawString` confirmed invoked
+  with sane parameters (real font, in-range screen coordinates, correct
+  virtual-screen detection) via a temporary diagnostic (removed before
+  committing). Honest limitation: the user's screen was locked for this
+  entire session, so no live *visual* confirmation of actual rendered
+  glyphs was possible (`screencapture`/window capture both fail while
+  locked - confirmed via `CGSSessionScreenIsLocked`) - correctness rests
+  on the parsing/invocation evidence above plus reuse of `DrawStretchPic`'s
+  already-extensively-verified pipeline, not a direct pixel check. Get a
+  real screenshot of rendered text next session before trusting this
+  further. Next: that visual verification, real LOD-adaptive patch
+  subdivision, real lighting derived from the map's actual data
+  (lightgrid/light entities), or broader `.shader` stage support are all
+  still open.
+
 - 2026-09-07: Phase 1, session 11 shipped: real MST_PATCH (curved
   surface) tessellation, closing the largest remaining world-geometry
   gap - 788 of the training map's surfaces (about 18% of the total)

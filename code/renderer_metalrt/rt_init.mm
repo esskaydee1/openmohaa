@@ -298,6 +298,7 @@ void RT_InitStubs( refexport_t *re );
 void RT_InitImageFunctions( refexport_t *re );
 void RT_InitSceneFunctions( refexport_t *re );
 void RT_InitWorldFunctions( refexport_t *re );
+void RT_InitFontFunctions( refexport_t *re );
 
 /*
 @@@@@@@@@@@@@@@@@@@@@
@@ -354,6 +355,9 @@ extern "C" refexport_t *GetRefAPI( int apiVersion, refimport_t *rimp )
 
 	// Real world/BSP geometry (Phase 1 session 4).
 	RT_InitWorldFunctions( &re );
+
+	// Real font loading/text rendering (Phase 1 session 12).
+	RT_InitFontFunctions( &re );
 
 	ri.Printf( PRINT_ALL, "----- finished renderer_metalrt R_Init -----\n" );
 
