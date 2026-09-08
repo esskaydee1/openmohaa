@@ -2,14 +2,19 @@
 ===========================================================================
 renderer_metalrt - Phase 1 session 4: real world/BSP geometry (LoadWorld).
 Session 11 adds MST_PATCH (curved surfaces - arches, pipes, rounded
-terrain detail).
+terrain detail). Session 21 adds real MoHAA heightmap terrain
+(LUMP_TERRAIN/cTerraPatch_t) - a separate lump from LUMP_SURFACES
+entirely, NOT the dsurface_t MST_TERRAIN enum value below (this BSP
+format's surfaces never actually use that value - real terrain lives in
+its own dedicated format, see RT_TessellateTerrainPatch).
 
-MST_TRIANGLE_SOUP, MST_TERRAIN, and MST_FLARE are still real, separate
-work for a later session - skipped here, not silently dropped: see the
-surfaceType switch below. No textures, no lightmaps, no visibility
-culling (PVS) yet either - every planar/patch surface in the map draws,
-every frame, as flat (session 10: lit) gray geometry through the same
-depth-tested 3D pipeline entity placeholders use (rt_scene.mm). That's
+MST_TRIANGLE_SOUP and MST_FLARE are still real, separate work for a
+later session - skipped here, not silently dropped: see the surfaceType
+switch below. No textures, no lightmaps, no visibility culling (PVS)
+yet either - every planar/patch surface and terrain patch in the map
+draws, every frame, as flat (session 10: lit) gray geometry through the
+same depth-tested 3D pipeline entity placeholders use (rt_scene.mm),
+or through a real texture where its shader resolves (session 14). That's
 enough to prove the real BSP data (already in world space, no
 per-surface transform needed) reaches the screen correctly before any
 of the material/culling work on top of it.
@@ -196,6 +201,138 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 	}
 }
 
+// Session 21: MoHAA's real heightmap-based terrain (LUMP_TERRAIN/
+// LUMP_TERRAININDEXES, cTerraPatch_t) turned out to be a SEPARATE format
+// from LUMP_SURFACES entirely - not one of dsurface_t's surfaceType
+// values, so it was invisible to every session before this one despite
+// MST_TERRAIN's enum value existing (this BSP format's actual surfaces
+// never use it; terrain patches live in their own dedicated lump). This
+// went unnoticed until a live visual bug report ("sheet of paper
+// wrapping the road") turned out to be resolved-but-badly-lit sky-shader
+// fallback fill in one spot, and led to checking for other geometry
+// gaps - training.bsp has 80 real terrain patches (its outer hillsides)
+// that were simply never read.
+//
+// Real terrain rendering (code/renderergl2/tr_terrain.c, ~1700 lines) is
+// a recursive ROAM-style bintree with per-vertex view-dependent LOD and
+// cross-patch neighbor stitching (iNorth/iEast/iSouth/iWest) - the same
+// "real geometry, fixed tessellation instead of adaptive LOD" tradeoff
+// already made for MST_PATCH above is applied here too: every patch
+// always renders at full fixed resolution (9x9 heightmap samples, 8x8
+// quads = 128 triangles), with vertex positions and the checkerboard
+// diagonal split verified byte-for-byte against cm_terrain.c's
+// CM_GenerateTerrainCollide (the collision code, which needs exactly
+// the same positions the renderer does to be consistent) - not against
+// tr_terrain.c's LOD-specific code, which only ever emits the full grid
+// as an end state of recursive midpoint splitting, never directly.
+// Per-vertex normals come from a central-difference heightmap slope
+// (standard technique), not the real renderer's normal source, since
+// cTerraPatch_t carries no per-vertex normal data of its own - a
+// deliberate approximation, not an attempt to match tr_terrain.c's own
+// (LOD-tree-dependent) normal computation.
+void RT_TessellateTerrainPatch( const cTerraPatch_t *patch,
+	std::vector<simd_float3> *outVerts, std::vector<simd_float3> *outNormals, std::vector<simd_float2> *outTexcoords )
+{
+	float x0 = (float)( (int)patch->x << 6 );
+	float y0 = (float)( (int)patch->y << 6 );
+	float z0 = (float)patch->iBaseHeight;
+
+	simd_float3 gridPos[9][9];
+	simd_float2 gridTex[9][9];
+	simd_float3 gridNorm[9][9];
+
+	simd_float2 uv00 = simd_make_float2( patch->texCoord[0][0][0], patch->texCoord[0][0][1] );
+	simd_float2 uv10 = simd_make_float2( patch->texCoord[1][0][0], patch->texCoord[1][0][1] );
+	simd_float2 uv01 = simd_make_float2( patch->texCoord[0][1][0], patch->texCoord[0][1][1] );
+	simd_float2 uv11 = simd_make_float2( patch->texCoord[1][1][0], patch->texCoord[1][1][1] );
+
+	for ( int row = 0; row < 9; row++ )
+	{
+		for ( int col = 0; col < 9; col++ )
+		{
+			float wx = x0 + col * 64.0f;
+			float wy = y0 + row * 64.0f;
+			float wz = z0 + 2.0f * (float)patch->heightmap[row * 9 + col];
+			gridPos[row][col] = simd_make_float3( wx, wy, wz );
+
+			// Bilinear across the patch's 4 corner UVs - matches what the
+			// real renderer's recursive midpoint-averaging LOD split
+			// converges to at full subdivision (repeated linear
+			// interpolation of a bilinear field reproduces the same
+			// field), see R_PreTessellateTerrain's s00/s01/s10/s11 corner
+			// assignment (tr_terrain.c) for the corner/index correspondence
+			// this mirrors: texCoord[0][0]=near corner, [1][0]/[0][1] the
+			// two adjacent corners, [1][1] the far corner.
+			float u = (float)col / 8.0f;
+			float v = (float)row / 8.0f;
+			simd_float2 top = uv00 + ( uv10 - uv00 ) * u;
+			simd_float2 bottom = uv01 + ( uv11 - uv01 ) * u;
+			gridTex[row][col] = top + ( bottom - top ) * v;
+		}
+	}
+
+	for ( int row = 0; row < 9; row++ )
+	{
+		for ( int col = 0; col < 9; col++ )
+		{
+			int colL = ( col > 0 ) ? col - 1 : col;
+			int colR = ( col < 8 ) ? col + 1 : col;
+			int rowD = ( row > 0 ) ? row - 1 : row;
+			int rowU = ( row < 8 ) ? row + 1 : row;
+
+			simd_float3 tangentX = gridPos[row][colR] - gridPos[row][colL];
+			simd_float3 tangentY = gridPos[rowU][col] - gridPos[rowD][col];
+			simd_float3 normal = simd_cross( tangentX, tangentY );
+			float len = simd_length( normal );
+			gridNorm[row][col] = ( len > 0.0001f ) ? ( normal / len ) : simd_make_float3( 0.0f, 0.0f, 1.0f );
+		}
+	}
+
+	// Checkerboard-alternating diagonal split, verified against
+	// CM_GenerateTerrainCollide exactly (its (i+j)&1 branch, i=col,
+	// j=row) - not a stylistic choice, a real heightmap mesh has a
+	// visible directional bias if every quad splits the same way.
+	for ( int row = 0; row < 8; row++ )
+	{
+		for ( int col = 0; col < 8; col++ )
+		{
+			simd_float3 v1 = gridPos[row][col];
+			simd_float3 v2 = gridPos[row][col + 1];
+			simd_float3 v3 = gridPos[row + 1][col + 1];
+			simd_float3 v4 = gridPos[row + 1][col];
+			simd_float3 n1 = gridNorm[row][col];
+			simd_float3 n2 = gridNorm[row][col + 1];
+			simd_float3 n3 = gridNorm[row + 1][col + 1];
+			simd_float3 n4 = gridNorm[row + 1][col];
+			simd_float2 t1 = gridTex[row][col];
+			simd_float2 t2 = gridTex[row][col + 1];
+			simd_float2 t3 = gridTex[row + 1][col + 1];
+			simd_float2 t4 = gridTex[row + 1][col];
+
+			if ( ( col + row ) & 1 )
+			{
+				outVerts->push_back( v2 ); outVerts->push_back( v4 ); outVerts->push_back( v3 );
+				outNormals->push_back( n2 ); outNormals->push_back( n4 ); outNormals->push_back( n3 );
+				outTexcoords->push_back( t2 ); outTexcoords->push_back( t4 ); outTexcoords->push_back( t3 );
+
+				outVerts->push_back( v4 ); outVerts->push_back( v2 ); outVerts->push_back( v1 );
+				outNormals->push_back( n4 ); outNormals->push_back( n2 ); outNormals->push_back( n1 );
+				outTexcoords->push_back( t4 ); outTexcoords->push_back( t2 ); outTexcoords->push_back( t1 );
+			}
+			else
+			{
+				outVerts->push_back( v3 ); outVerts->push_back( v1 ); outVerts->push_back( v4 );
+				outNormals->push_back( n3 ); outNormals->push_back( n1 ); outNormals->push_back( n4 );
+				outTexcoords->push_back( t3 ); outTexcoords->push_back( t1 ); outTexcoords->push_back( t4 );
+
+				outVerts->push_back( v1 ); outVerts->push_back( v3 ); outVerts->push_back( v2 );
+				outNormals->push_back( n1 ); outNormals->push_back( n3 ); outNormals->push_back( n2 );
+				outTexcoords->push_back( t1 ); outTexcoords->push_back( t3 ); outTexcoords->push_back( t2 );
+			}
+		}
+	}
+}
+
 } // namespace
 
 static void RT_LoadWorld( const char *name )
@@ -221,9 +358,11 @@ static void RT_LoadWorld( const char *name )
 	lump_t *surfsLump = Q_GetLumpByVersion( header, LUMP_SURFACES );
 	lump_t *vertsLump = Q_GetLumpByVersion( header, LUMP_DRAWVERTS );
 	lump_t *indexLump = Q_GetLumpByVersion( header, LUMP_DRAWINDEXES );
+	lump_t *terrainLump = Q_GetLumpByVersion( header, LUMP_TERRAIN );
 
 	if ( shadersLump->filelen % sizeof( dshader_t ) || surfsLump->filelen % sizeof( dsurface_t )
-		|| vertsLump->filelen % sizeof( drawVert_t ) || indexLump->filelen % sizeof( int ) )
+		|| vertsLump->filelen % sizeof( drawVert_t ) || indexLump->filelen % sizeof( int )
+		|| terrainLump->filelen % sizeof( cTerraPatch_t ) )
 	{
 		ri.Printf( PRINT_ERROR, "renderer_metalrt: LoadWorld: \"%s\" has malformed lump sizes\n", name );
 		ri.FS_FreeFile( fileData );
@@ -236,6 +375,8 @@ static void RT_LoadWorld( const char *name )
 	dsurface_t *surfaces = (dsurface_t *)( fileData + surfsLump->fileofs );
 	drawVert_t *allVerts = (drawVert_t *)( fileData + vertsLump->fileofs );
 	int *allIndexes = (int *)( fileData + indexLump->fileofs );
+	int numTerrainPatches = terrainLump->filelen / sizeof( cTerraPatch_t );
+	cTerraPatch_t *terrainPatches = (cTerraPatch_t *)( fileData + terrainLump->fileofs );
 
 	// Counting pass purely for the summary log line below - doesn't
 	// affect how the vectors are built (session 14 groups by shader
@@ -258,11 +399,11 @@ static void RT_LoadWorld( const char *name )
 	if ( numSkippedSurfaces > 0 )
 	{
 		ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar, %d patch surfaces loaded, "
-			"%d other surfaces (triangle-soup/terrain/flares) skipped - not implemented yet\n",
+			"%d other surfaces (triangle-soup/flares) skipped - not implemented yet\n",
 			name, numPlanarSurfaces, numPatchSurfaces, numSkippedSurfaces );
 	}
 
-	if ( numPlanarSurfaces == 0 && numPatchSurfaces == 0 )
+	if ( numPlanarSurfaces == 0 && numPatchSurfaces == 0 && numTerrainPatches == 0 )
 	{
 		ri.FS_FreeFile( fileData );
 		return;
@@ -323,6 +464,17 @@ static void RT_LoadWorld( const char *name )
 			}
 		}
 
+		// Session 21: terrain patches are keyed by their own iShader
+		// field into this SAME shader lump - not a dsurface_t, so they
+		// don't appear in the surfaces[] loop above, but they group into
+		// this shaderIdx's contiguous vertex range exactly the same way.
+		for ( int t = 0; t < numTerrainPatches; t++ )
+		{
+			if ( terrainPatches[t].iShader != shaderIdx )
+				continue;
+			RT_TessellateTerrainPatch( &terrainPatches[t], &worldVerts, &worldNormals, &worldTexcoords );
+		}
+
 		int groupCount = (int)worldVerts.size() - groupStart;
 		if ( groupCount == 0 )
 			continue; // no planar/patch surface in the map actually uses this shader
@@ -381,9 +533,9 @@ static void RT_LoadWorld( const char *name )
 	                                                     length:worldTexcoords.size() * sizeof( simd_float2 )
 	                                                    options:MTLResourceStorageModeShared];
 
-	ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar, %d patch surfaces, %d verts, "
-		"%d/%d shader groups textured\n",
-		name, numPlanarSurfaces, numPatchSurfaces, rtWorldVertexCount, numTexturedGroups, numRtWorldGroups );
+	ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar, %d patch surfaces, %d terrain patches, "
+		"%d verts, %d/%d shader groups textured\n",
+		name, numPlanarSurfaces, numPatchSurfaces, numTerrainPatches, rtWorldVertexCount, numTexturedGroups, numRtWorldGroups );
 }
 
 void RT_DrawWorld( simd_float4x4 viewProj )

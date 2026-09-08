@@ -22,10 +22,19 @@ See code/renderer_metalrt/CLAUDE.md and docs/ for scope and hard rules.
 // of every GL src/dst blend factor combination Metal could represent -
 // RT_BLEND_ALPHA also covers the real "filter" (multiply-darken) blend
 // preset, an approximation, not a fourth pipeline variant.
+// Session 20: RT_BLEND_ALPHATEST is a separate bucket from RT_BLEND_ALPHA -
+// a shader's `alphaFunc` (alpha-cutout, e.g. foliage: fully opaque leaf
+// or fully invisible gap, no in-between) is a qualitatively different
+// technique from `blendFunc` (smooth alpha blending, e.g. glass/smoke),
+// not just another blend-factor combination. Mapping alphaFunc onto
+// RT_BLEND_ALPHA would blend a leaf's edges into whatever's behind it
+// instead of cutting them out, and would skip writing depth where real
+// alpha-tested surfaces should.
 typedef enum {
 	RT_BLEND_OPAQUE,
 	RT_BLEND_ALPHA,
-	RT_BLEND_ADDITIVE
+	RT_BLEND_ADDITIVE,
+	RT_BLEND_ALPHATEST
 } rtBlendMode_t;
 
 #ifdef __cplusplus

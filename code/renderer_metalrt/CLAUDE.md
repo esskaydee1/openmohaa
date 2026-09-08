@@ -152,6 +152,65 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, sessions 20-21 shipped, both from a single live
+  bug report once the user was back and looking at the screen directly:
+  "trees look pasted on a 2D black wallpaper wrapping the road." Session
+  20: real alpha-test cutout. `textures/misc_outside/treeline_center`
+  (and every other foliage/fence/chain-link shader) uses `alphaFunc
+  GE128`, not `blendFunc` - a qualitatively different technique (hard
+  per-pixel discard, not blending) this renderer never implemented, so
+  the texture's transparent-background pixels (black) rendered fully
+  opaque. Added `RT_BLEND_ALPHATEST` (`rt_local.h`), `alphaFunc`
+  detection in `RT_FindShaderScriptTexture` (`rt_image.mm`, coarse like
+  the existing blendfunc classifier - every variant becomes "discard
+  below 50% alpha", not a faithful per-variant threshold), and a new
+  Metal fragment function + pipeline variant (`rt_fragment_3d_tex_alphatest`,
+  opaque blend config, depth write on) wired into both the world and
+  entity draw paths (`rt_scene.mm`). Live-verified: trees now show real
+  leaf/branch silhouettes with gaps, not a solid block.
+  Session 21: real MoHAA heightmap terrain. Investigating the user's
+  "even ignoring the trees, this isn't graphically better" pushback (and
+  a literal "sheet of paper wrapping the road" panel visible in a
+  screenshot) led to discovering `LUMP_TERRAIN`/`LUMP_TERRAININDEXES` -
+  MoHAA's real terrain system, a SEPARATE lump format from
+  `LUMP_SURFACES` entirely, not something `dsurface_t`'s `MST_TERRAIN`
+  enum value (which this BSP format's surfaces never actually use)
+  would ever catch - 80 real terrain patches on training.bsp, 100%
+  unrendered until this session despite every planar/patch surface
+  already working. Added `RT_TessellateTerrainPatch` (`rt_world.mm`):
+  reads `cTerraPatch_t` (verified field-by-field against a compiled
+  probe of the real struct - `qfiles.h`'s `dheader_t` has an `int
+  checksum` between `version` and `lumps[]` that a first attempt at
+  parsing the raw BSP missed, throwing off every manual lump-offset
+  calculation until caught), reconstructs each patch's 9x9 heightmap
+  grid into positions with the exact formula/checkerboard diagonal
+  split verified against `cm_terrain.c`'s `CM_GenerateTerrainCollide`
+  (collision code, which must agree with the renderer's positions
+  exactly), bilinear UVs from the patch's 4 corner texcoords, and
+  central-difference per-vertex normals (real terrain has no stored
+  per-vertex normals). Deliberately skips the real renderer's ~1700-line
+  recursive ROAM-style LOD/neighbor-stitching system (`tr_terrain.c`) -
+  same "real geometry, fixed tessellation instead of adaptive LOD"
+  tradeoff already made for MST_PATCH - always renders every patch at
+  full fixed resolution (128 triangles/patch). Patches key into the
+  SAME shader lump as regular surfaces (`iShader`), so they group into
+  `RT_LoadWorld`'s existing per-shader vertex-range system with no new
+  draw-side code at all. Verified: exact vertex-count match (loaded 80
+  patches, +30,720 verts = precisely 80*128*3), builds/links/runs clean,
+  90+ seconds stable, no crash. Turned out NOT to explain the reported
+  visual bug, though - the training map's 80 terrain patches all sit far
+  outside the player's starting corridor (verified against their real
+  x0/y0 bounds vs. the map's entity spawn origins), so this is real,
+  correct, previously-completely-missing geometry for other parts of
+  the map, not what was actually causing the "sheet of paper" panel in
+  view. By elimination (only 1 of the now-73 world shader groups is
+  unresolved), that panel is confirmed to be `textures/sky/mohday2`'s
+  flat-gray fallback fill - real sky rendering is the next, now
+  strongly-evidenced target for the ACTUAL reported issue. Next: real
+  sky rendering (skyParms, 6 real JPG faces already available since
+  session 15), real LOD-adaptive patch/terrain subdivision, real
+  lightgrid-based lighting, TIKI animation/skinning.
+
 - 2026-09-07: Phase 1, session 18 shipped: closed the long-open
   "GL1 200fps vs metalrt 85-95fps" investigation - a diagnostic session,
   no rendering-path fix needed or applied, no visual verification

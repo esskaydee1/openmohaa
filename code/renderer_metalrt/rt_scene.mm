@@ -140,6 +140,10 @@ id<MTLRenderPipelineState> rtPipelineTextured3D = nil;
 // color-attachment blend config each.
 id<MTLRenderPipelineState> rtPipelineTexturedAlpha3D = nil;
 id<MTLRenderPipelineState> rtPipelineTexturedAdditive3D = nil;
+// Session 20: opaque blend config like rtPipelineTextured3D (no
+// blending, depth write on) - the "cut out or fully there" look comes
+// from rt_fragment_3d_tex_alphatest's discard, not from blend state.
+id<MTLRenderPipelineState> rtPipelineTexturedAlphaTest3D = nil;
 id<MTLDepthStencilState> rtDepthStateBlended3D = nil;
 id<MTLSamplerState> rtSamplerTextured3D = nil;
 
@@ -175,6 +179,22 @@ const char *rtShaderSourceTextured3D =
 	"    float ndotl = max(dot(n, lightDir), 0.0);\n"
 	"    float lighting = mix(0.35, 1.0, ndotl);\n"
 	"    return float4(texColor.rgb * lighting, texColor.a);\n"
+	"}\n"
+	// Session 20: same shading as rt_fragment_3d_tex, but discards
+	// fully instead of blending wherever the texture's alpha is below
+	// 50% - a shader's `alphaFunc` (cutout foliage/fences/chain-link,
+	// as opposed to `blendFunc`'s smooth blending) needs this: without
+	// it, the texture's fully-transparent background pixels (usually
+	// black) render as solid opaque black instead of vanishing.
+	"fragment float4 rt_fragment_3d_tex_alphatest(VertexOutTex in [[stage_in]],\n"
+	"    texture2d<float> tex [[texture(0)]], sampler samp [[sampler(0)]],\n"
+	"    constant float3 &lightDir [[buffer(0)]]) {\n"
+	"    float4 texColor = tex.sample(samp, in.texcoord);\n"
+	"    if (texColor.a < 0.5) discard_fragment();\n"
+	"    float3 n = normalize(in.worldNormal);\n"
+	"    float ndotl = max(dot(n, lightDir), 0.0);\n"
+	"    float lighting = mix(0.35, 1.0, ndotl);\n"
+	"    return float4(texColor.rgb * lighting, 1.0);\n"
 	"}\n";
 
 } // namespace
@@ -203,6 +223,7 @@ bool RT_EnsurePipelineTextured3D( void )
 
 	id<MTLFunction> vertexFn = [library newFunctionWithName:@"rt_vertex_3d_tex"];
 	id<MTLFunction> fragmentFn = [library newFunctionWithName:@"rt_fragment_3d_tex"];
+	id<MTLFunction> fragmentFnAlphaTest = [library newFunctionWithName:@"rt_fragment_3d_tex_alphatest"];
 
 	MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
 	desc.vertexFunction = vertexFn;
@@ -264,6 +285,22 @@ bool RT_EnsurePipelineTextured3D( void )
 		return false;
 	}
 
+	// Session 20: opaque blend config, same as rtPipelineTextured3D's
+	// descriptor above, just the alpha-test fragment function instead.
+	MTLRenderPipelineDescriptor *alphaTestDesc = [[MTLRenderPipelineDescriptor alloc] init];
+	alphaTestDesc.vertexFunction = vertexFn;
+	alphaTestDesc.fragmentFunction = fragmentFnAlphaTest;
+	alphaTestDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	alphaTestDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+
+	rtPipelineTexturedAlphaTest3D = [device newRenderPipelineStateWithDescriptor:alphaTestDesc error:&error];
+	if ( rtPipelineTexturedAlphaTest3D == nil )
+	{
+		ri.Printf( PRINT_ERROR, "renderer_metalrt: failed to create alpha-test textured 3D pipeline: %s\n",
+			error ? [[error localizedDescription] UTF8String] : "unknown error" );
+		return false;
+	}
+
 	// Blended/transparent surfaces test depth (so solid geometry in
 	// front still occludes them) but don't write it - otherwise a
 	// transparent surface would incorrectly block whatever draws behind
@@ -309,6 +346,13 @@ void RT_DrawTexturedGeometry( id<MTLBuffer> vertexBuffer, id<MTLBuffer> texcoord
 	{
 		pipeline = rtPipelineTexturedAdditive3D;
 		depthState = rtDepthStateBlended3D;
+	}
+	else if ( blendMode == RT_BLEND_ALPHATEST )
+	{
+		// Opaque depth state (write enabled), same as the default case -
+		// alpha-tested surfaces are per-pixel either fully there or fully
+		// gone, not partially transparent, so they occlude normally.
+		pipeline = rtPipelineTexturedAlphaTest3D;
 	}
 
 	[encoder setRenderPipelineState:pipeline];
@@ -922,6 +966,12 @@ static void RT_RenderScene( const refdef_t *fd )
 						pipeline = rtPipelineTexturedAdditive3D;
 						depthState = rtDepthStateBlended3D;
 					}
+					else if ( surf->blendMode == RT_BLEND_ALPHATEST )
+					{
+						pipeline = rtPipelineTexturedAlphaTest3D;
+						// depthState stays rtDepthState3D (opaque/write) -
+						// see RT_DrawTexturedGeometry's identical case.
+					}
 
 					[encoder setRenderPipelineState:pipeline];
 					[encoder setDepthStencilState:depthState];
@@ -968,6 +1018,17 @@ static void RT_RenderScene( const refdef_t *fd )
 	}
 }
 
+// Session 19: rtModel_t has stored its registration name (RT_RegisterModelInternal)
+// since session 6 - this was a loud stub always returning "" for no
+// reason other than never being wired up. Pure accessor, no interaction
+// with the render path.
+const char *RT_GetModelName( qhandle_t hModel )
+{
+	if ( hModel <= 0 || hModel > numRtModels )
+		return "";
+	return rtModels[hModel].name;
+}
+
 void RT_InitSceneFunctions( refexport_t *re )
 {
 	re->RegisterModel = RT_RegisterModel;
@@ -976,4 +1037,5 @@ void RT_InitSceneFunctions( refexport_t *re )
 	re->ClearScene = RT_ClearScene;
 	re->AddRefEntityToScene = RT_AddRefEntityToScene;
 	re->RenderScene = RT_RenderScene;
+	re->GetModelName = RT_GetModelName;
 }

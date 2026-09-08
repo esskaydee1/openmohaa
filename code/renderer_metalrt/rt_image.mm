@@ -321,6 +321,17 @@ bool RT_FindShaderScriptTexture( const char *shaderName, char *outPath, size_t o
 				{
 					*outBlendMode = RT_ClassifyBlendFunc( &p );
 				}
+				else if ( !Q_stricmp( tok, "alphafunc" ) && outBlendMode != NULL )
+				{
+					// Session 20: coarse like RT_ClassifyBlendFunc - every
+					// real alphaFunc variant (GE128/GT0/LT128) becomes the
+					// same "discard below 50% alpha" cutout in the shader,
+					// not a faithful per-variant threshold. GE128 (>= 50%
+					// opaque) is by far the common case (foliage, fences,
+					// chain-link) - see textures/misc_outside/treeline_center.
+					COM_ParseExt( &p, qfalse ); // consume GE128/GT0/LT128 - not used
+					*outBlendMode = RT_BLEND_ALPHATEST;
+				}
 			}
 
 			break; // done with this shader block
@@ -511,6 +522,49 @@ rtBlendMode_t RT_GetImageBlendMode( qhandle_t handle )
 	return rtImages[handle].blendMode;
 }
 
+// Session 19: these three and CountTextureMemory below were previously
+// loud stubs always returning 0/"" - real values were sitting right
+// here in rtImage_t the whole time (width/height/name are all recorded
+// at registration, see RT_RegisterImageCommon above), just never wired
+// up. Cgame UI layout code calls GetShaderWidth/Height to size icons
+// correctly, so the old 0-always stub likely caused invisible-or-
+// wrong-size HUD elements - not verified live (screen locked this
+// session), but these are pure accessors with zero interaction with
+// the render path, so there's nothing here that could newly break
+// already-working rendering even if unverified visually.
+int RT_GetShaderWidth( qhandle_t hShader )
+{
+	if ( hShader <= 0 || hShader > numRtImages )
+		return 0;
+	return rtImages[hShader].width;
+}
+
+int RT_GetShaderHeight( qhandle_t hShader )
+{
+	if ( hShader <= 0 || hShader > numRtImages )
+		return 0;
+	return rtImages[hShader].height;
+}
+
+const char *RT_GetShaderName( qhandle_t hShader )
+{
+	if ( hShader <= 0 || hShader > numRtImages )
+		return "";
+	return rtImages[hShader].name;
+}
+
+// Matches the real renderers' definition closely enough for its only
+// real use (console/diagnostic reporting, not a hard budget check):
+// sum of each registered texture's raw RGBA byte count, ignoring
+// mipmaps (this renderer doesn't generate any, see RT_CreateTexture).
+int RT_CountTextureMemory( void )
+{
+	int total = 0;
+	for ( int i = 1; i <= numRtImages; i++ )
+		total += rtImages[i].width * rtImages[i].height * 4;
+	return total;
+}
+
 static qhandle_t RT_RegisterShader( const char *name )
 {
 	return RT_RegisterImageCommon( name );
@@ -630,4 +684,8 @@ void RT_InitImageFunctions( refexport_t *re )
 	re->DrawStretchPic = RT_DrawStretchPic;
 	re->Set2DWindow = RT_Set2DWindow;
 	re->Scissor = RT_Scissor;
+	re->GetShaderWidth = RT_GetShaderWidth;
+	re->GetShaderHeight = RT_GetShaderHeight;
+	re->GetShaderName = RT_GetShaderName;
+	re->CountTextureMemory = RT_CountTextureMemory;
 }
