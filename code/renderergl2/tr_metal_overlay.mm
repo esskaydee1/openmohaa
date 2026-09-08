@@ -383,13 +383,29 @@ extern "C" void RT_OverlayRenderAndPresent( void )
 	if ( !r_metalShadowOverlay->integer )
 		return;
 
-	if ( rtoLayer == nil || rtoAccelStructure == nil || !rtoHaveCamera )
+	// rtoHaveCamera is only true for the one call right after
+	// RT_OverlayUpdateCamera actually ran this frame (from RE_RenderScene).
+	// UI-only frames - menus, mission-briefing screens, loading screens -
+	// never call RE_RenderScene, so without consuming the flag here the
+	// layer would keep showing whatever 3D shadow frame it last
+	// presented, frozen on top of unrelated 2D content. Found via a
+	// screenshot of m1l1's mission-briefing paper showing a stale shadow
+	// silhouette from the previous 3D view composited right over it.
+	if ( !rtoHaveCamera )
+	{
+		rtoLayer.hidden = YES;
+		return;
+	}
+	rtoHaveCamera = false; // consumed - must be set again next frame to render/present
+
+	if ( rtoLayer == nil || rtoAccelStructure == nil )
 		return;
 	if ( !RTO_EnsureAttached() )
 		return;
 	if ( !RTO_EnsurePipeline() )
 		return;
 
+	rtoLayer.hidden = NO;
 	id<CAMetalDrawable> drawable = [rtoLayer nextDrawable];
 	if ( drawable == nil )
 		return;
