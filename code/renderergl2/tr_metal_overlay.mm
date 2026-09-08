@@ -34,6 +34,57 @@ UVs, real Bezier-tessellated patches, real terrain LOD mesh where
 applicable) - not a re-parse of the raw BSP file. This was the entire
 point of building on top of GL2 instead of renderer_metalrt's from-
 scratch approach: zero format reverse-engineering risk this time.
+
+KNOWN GAPS, measured (not guessed) against the whole shipped game - 70
+.pk3 files, 8789 distinct shaders defined, 177 distinct .bsp maps, 2800
+distinct shaders actually referenced by those maps:
+
+- Movers are IN the accel structure but FROZEN at their closed/authored
+  position. func_door/func_plat/func_train/etc. surfaces live in the
+  same tr.world->surfaces array as the static world (bmodel_t is just a
+  {firstSurface,numSurfaces} window into it - see tr_bsp.c's
+  R_LoadSubmodels/R_LoadSurfaces), so RT_OverlayBuildWorldAccelStructure's
+  walk over tr.world->numsurfaces picks them up - but it reads
+  bspSurf->verts[i].xyz raw, with no per-entity transform applied (real
+  gameplay draws them correctly via R_RotateForEntity + a live
+  trRefEntity_t, none of which this function consults). Net effect: a
+  closed door casts a correct-looking shadow in its closed position
+  forever; the moment it opens, that shadow stays glued to the empty
+  doorway while the now-moved door casts nothing. Fixing this for real
+  needs either per-frame entity-aware updates (expensive - defeats the
+  "build once at map load" approach) or excluding movers from the accel
+  structure entirely (cheap, but geometry that legitimately blocks light
+  most of the time, e.g. a mostly-closed door, would stop doing so).
+- Sky (isSky, from skyParms - not surfaceparm sky, not sort sky, those
+  are unrelated flags) and alpha-test cutout (any stage using alphaFunc)
+  are excluded below and confirmed against the actual parsing rules in
+  tr_shader.c. Of the 2800 shaders actually used in shipped maps: 47 are
+  sky, 228 are alpha-test cutout.
+- Blend/transparent shaders (water, glass, decals) are NOT excluded yet,
+  and this needs a smarter test than "any stage uses blendFunc" before
+  it's safe to add: that blunt test matches 1463 of the 2800 used
+  shaders (52%) - a much bigger bucket than expected, because it also
+  catches ordinary opaque walls that merely have a second, blended
+  decal/grime overlay stage on top of an opaque base stage. Blanket-
+  excluding all 1463 would likely remove most of the world's walls from
+  shadow-casting, a worse regression than the water/glass problem it's
+  meant to fix. The real fix needs to test whether the shader's PRIMARY/
+  base stage (not just any stage) is non-opaque.
+- The remaining 287 used-but-unclassified shaders (no matching .shader
+  script text found) are implicit/default shaders - Quake3-family
+  convention when a BSP references a shader name with no script entry.
+  Confirmed via tr_shader.c: their default stateBits is GLS_DEFAULT
+  (GLS_DEPTHMASK_TRUE only, no blend, no atest) - i.e. plain opaque, so
+  they're already handled correctly by doing nothing special for them.
+- Per-material rendering (metal looks like metal, glass refracts, water
+  reflects) isn't a gap so much as a different, larger undertaking: this
+  overlay only ever asks "is this triangle solid or not" for shadow-
+  casting, it does not vary behavior by material. Worth noting the map
+  data doesn't even cleanly support that today - surfaceparm rock/wood/
+  metal/stone/etc. exist and are tagged on many shaders, but tr_shader.c
+  doesn't recognize them (not in its infoParms[] table); they're wired
+  up only in fgame/ for footstep sounds and impact FX, never reaching
+  the renderer at all.
 ===========================================================================
 */
 #import <Metal/Metal.h>
