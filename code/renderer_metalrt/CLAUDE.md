@@ -152,6 +152,37 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Post-unlock verification closed out both sessions 12 and
+  13's deferred visual checks (the user's screen was locked for the
+  entirety of both). Confirmed on the training map: session 12's
+  `DrawString` genuinely renders live, dynamic text ("Health"/"100"/an
+  FPS counter that visibly changes frame to frame, so it can't be a
+  baked image) - not just parsing successfully, actually drawing
+  correctly. Session 13's blend-mode pipeline additions cause no
+  regression to existing opaque rendering (nothing in this specific
+  scene happens to use a transparent/additive shader, so the blend
+  paths themselves still await a direct visual hit, but the change is
+  provably safe). Also did a direct side-by-side against `opengl1`
+  (real retail rendering) from the identical training-map spawn point,
+  at the user's request, to honestly answer "is this doing heavy
+  lifting": geometry, perspective, and lighting/shading all match GL1's
+  scene layout exactly (same guard tower, road, fence positions;
+  visible gradient shading on the terrain) - real, substantial work,
+  not cosmetic. The stark, honest gap the comparison exposes: **world/
+  BSP surfaces still have zero texturing** (flat gray everywhere) -
+  only entity models (weapons/props, sessions 7-8) ever got real
+  textures; the map geometry itself never did. Also recorded for
+  reference, not yet investigated: GL1 ran this scene at 200 FPS vs.
+  metalrt's 84.7 - a real, currently-unexplained performance gap (a
+  likely early suspect: `RT_DrawStretchPic`/`RT_DrawString`'s per-call
+  `newBufferWithBytes` for every 2D quad, allocating a fresh Metal
+  buffer every single glyph/UI element every frame instead of reusing
+  one). Next: real world/BSP surface texturing (the clear top pick -
+  it's the single biggest remaining visual gap and now has direct
+  before/after proof), the FPS gap, real LOD-adaptive patch subdivision,
+  real lightgrid-based lighting, or broader `.shader` stage support are
+  all open.
+
 - 2026-09-07: Phase 1, session 13 shipped: real `.shader` blend-mode
   support - transparent/additive surfaces (glass, glow, fire, energy
   effects) previously always rendered fully opaque regardless of what
