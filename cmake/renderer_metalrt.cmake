@@ -21,8 +21,9 @@ include(renderer_common)
 # 15) needs libjpeg - always the vendored thirdparty/jpeg-9f source
 # (matching cmake/libraries/jpeg.cmake's USE_INTERNAL_JPEG path), not a
 # system libjpeg, to keep this renderer's build fully self-contained
-# with no external dependency to find. tr_image_png.c (needs puff.c's
-# inflate) is still real, separate follow-up work.
+# with no external dependency to find. tr_image_png.c (session 16) needs
+# puff.c's inflate, which - like tga/bmp/pcx - is pure in-tree C with no
+# external library, so it's added directly alongside them.
 set(RENDERER_METALRT_SOURCES
     ${SOURCE_DIR}/renderer_metalrt/rt_init.mm
     ${SOURCE_DIR}/renderer_metalrt/rt_image.mm
@@ -34,6 +35,8 @@ set(RENDERER_METALRT_SOURCES
     ${SOURCE_DIR}/renderercommon/tr_image_bmp.c
     ${SOURCE_DIR}/renderercommon/tr_image_pcx.c
     ${SOURCE_DIR}/renderercommon/tr_image_jpg.c
+    ${SOURCE_DIR}/renderercommon/tr_image_png.c
+    ${SOURCE_DIR}/renderercommon/puff.c
 )
 
 set(RENDERER_METALRT_JPEG_DIR ${SOURCE_DIR}/thirdparty/jpeg-9f)

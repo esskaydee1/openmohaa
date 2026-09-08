@@ -152,6 +152,32 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 16 shipped: real PNG image decoding.
+  `tr_image_png.c` + `puff.c` (its inflate implementation) are, like
+  TGA/BMP/PCX, pure in-tree C with no external library dependency -
+  unlike session 15's JPG (which needed the vendored libjpeg) this was a
+  direct addition to `RENDERER_METALRT_SOURCES` in
+  `cmake/renderer_metalrt.cmake`, no glob/third-party dir/extra defines
+  needed. `R_LoadPNG` matches the same `(name, byte**, int*, int*)` →
+  RGBA contract as the other four loaders, so `rt_image.mm`'s
+  `RT_LoadImageFile` table gained `{"png", R_LoadPNG}` with zero other
+  changes. Built and linked clean. Verified stable on the training map
+  (2.5+ minutes, no crash, no regression) - `LoadWorld` still reports
+  63/69 shader groups textured, unchanged from session 15, because the
+  remaining 6 are the already-known complex multi-stage/lightmap/sky
+  shaders, not a format gap. Worth being explicit about: a full scan of
+  every installed pk3 (`main/` and `mainta/`, both the base game and the
+  Restoration/Allied-Assault content) found **zero** `.png` files and
+  zero `.shader` script references to png - so this session adds real,
+  correct decoding capability but has no visible effect on the currently
+  installed asset set. That's an honest, expected result (this asset
+  era predates PNG's use in this engine's content), not a wasted
+  session - the loader is now there for whatever content does use it.
+  Next: broader `.shader` multi-stage/lightmap-aware parsing for the
+  remaining 6/69 world shaders, real LOD-adaptive patch subdivision,
+  real lightgrid-based lighting, TIKI animation/skinning, or the
+  GL1-vs-metalrt FPS gap - all still open.
+
 - 2026-09-07: Phase 1, session 15 shipped: real JPG image decoding,
   closing most of session 14's 59/69 unresolved-shader gap in one move.
   Hypothesis going in: the original 2002 MOHAA assets mix TGA and JPG

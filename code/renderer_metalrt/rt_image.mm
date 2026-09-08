@@ -22,13 +22,15 @@ other renderers use, which never touch GL/qgl themselves.
 // renderer's build self-contained; R_LoadJPG already outputs RGBA
 // (4 bytes/pixel, alpha forced to 255) exactly like the other three
 // loaders, so it's a drop-in addition to RT_LoadImageFile below with no
-// changes needed anywhere else in the pipeline. PNG (needs puff.c's
-// inflate) is still real, separate follow-up work.
+// changes needed anywhere else in the pipeline. PNG (session 16) needs
+// puff.c's inflate, which - like tga/bmp/pcx - is pure in-tree C with no
+// external library, so R_LoadPNG is just as much a drop-in addition.
 extern "C" {
 void R_LoadTGA( const char *name, byte **pic, int *width, int *height );
 void R_LoadBMP( const char *name, byte **pic, int *width, int *height );
 void R_LoadPCX( const char *name, byte **pic, int *width, int *height );
 void R_LoadJPG( const char *name, byte **pic, int *width, int *height );
+void R_LoadPNG( const char *name, byte **pic, int *width, int *height );
 }
 
 namespace {
@@ -354,6 +356,7 @@ byte *RT_LoadImageFile( const char *name, int *width, int *height )
 		{ "bmp", R_LoadBMP },
 		{ "pcx", R_LoadPCX },
 		{ "jpg", R_LoadJPG },
+		{ "png", R_LoadPNG },
 	};
 
 	if ( ext && *ext )
