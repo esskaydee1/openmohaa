@@ -27,12 +27,48 @@ bool RT_EnsurePipeline3D( void );
 id<MTLRenderPipelineState> RT_GetPipeline3D( void );
 id<MTLDepthStencilState> RT_GetDepthState3D( void );
 simd_float3 RT_GetLightDir( void );
+bool RT_EnsurePipelineTextured3D( void );
+void RT_DrawTexturedGeometry( id<MTLBuffer> vertexBuffer, id<MTLBuffer> texcoordBuffer, id<MTLBuffer> normalBuffer,
+	int vertexStart, int vertexCount, simd_float4x4 mvp, simd_float3x3 normalMatrix,
+	id<MTLTexture> texture, rtBlendMode_t blendMode, simd_float3 lightDir );
+
+// rt_image.mm (not anonymous-namespace-scoped there) - session 14
+// reuses these to resolve a world surface's shader name to a texture
+// the exact same way rt_scene.mm's TIKI surfaces already do.
+qhandle_t RT_RegisterImageCommon( const char *name );
+id<MTLTexture> RT_GetImageTexture( qhandle_t handle );
+rtBlendMode_t RT_GetImageBlendMode( qhandle_t handle );
 
 namespace {
 
 id<MTLBuffer> rtWorldVertexBuffer = nil;
 id<MTLBuffer> rtWorldNormalBuffer = nil;
+// Session 14: parallel to rtWorldVertexBuffer/rtWorldNormalBuffer -
+// always baked (from drawVert_t::st, already present in the BSP data),
+// same reasoning as rt_scene.mm's TIKI texcoord buffer.
+id<MTLBuffer> rtWorldTexcoordBuffer = nil;
 int rtWorldVertexCount = 0;
+
+// Session 14: one real texture (or nil - flat gray fallback, most
+// .shader-script names still don't resolve to a direct image or a
+// script this parser understands) per unique BSP shader actually used
+// by the map, with the [vertexStart, vertexStart+vertexCount) range of
+// the single shared vertex/texcoord/normal buffers above that belongs
+// to it. World geometry has no index buffer (session 4's design, a
+// flat non-indexed triangle list) - grouping by contiguous vertex
+// RANGE per shader (built by processing surfaces shader-by-shader,
+// not surface-by-surface) is the non-indexed equivalent of
+// rt_scene.mm's per-surface indexOffset/indexCount.
+struct rtWorldGroup_t {
+	id<MTLTexture> texture;
+	rtBlendMode_t blendMode;
+	int vertexStart;
+	int vertexCount;
+};
+
+#define MAX_RT_WORLD_GROUPS 1024
+rtWorldGroup_t rtWorldGroups[MAX_RT_WORLD_GROUPS];
+int numRtWorldGroups = 0;
 
 // Session 11: MST_PATCH surfaces are control-point grids of overlapping
 // 3x3 biquadratic Bezier sub-patches (the classic idTech3 curved-surface
@@ -54,13 +90,15 @@ const int RT_MAX_PATCH_DIM = 64; // sanity bound against a malformed BSP, not a 
 // basis weights, rather than recomputed from the tessellated geometry
 // (MakeMeshNormals in the real engine) - a reasonable approximation for
 // a first pass, not exact for a highly curved patch.
-void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v, simd_float3 *outPos, simd_float3 *outNormal )
+void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v,
+	simd_float3 *outPos, simd_float3 *outNormal, simd_float2 *outTexcoord )
 {
 	float bu[3] = { ( 1.0f - u ) * ( 1.0f - u ), 2.0f * u * ( 1.0f - u ), u * u };
 	float bv[3] = { ( 1.0f - v ) * ( 1.0f - v ), 2.0f * v * ( 1.0f - v ), v * v };
 
 	simd_float3 pos = simd_make_float3( 0.0f, 0.0f, 0.0f );
 	simd_float3 normal = simd_make_float3( 0.0f, 0.0f, 0.0f );
+	simd_float2 texcoord = simd_make_float2( 0.0f, 0.0f );
 	for ( int j = 0; j < 3; j++ )
 	{
 		for ( int i = 0; i < 3; i++ )
@@ -68,22 +106,25 @@ void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v, simd
 			float weight = bu[i] * bv[j];
 			const float *xyz = ctrl[j][i]->xyz;
 			const float *n = ctrl[j][i]->normal;
+			const float *st = ctrl[j][i]->st;
 			pos += weight * simd_make_float3( xyz[0], xyz[1], xyz[2] );
 			normal += weight * simd_make_float3( n[0], n[1], n[2] );
+			texcoord += weight * simd_make_float2( st[0], st[1] );
 		}
 	}
 
 	*outPos = pos;
 	float normalLen = simd_length( normal );
 	*outNormal = ( normalLen > 0.0001f ) ? ( normal / normalLen ) : simd_make_float3( 0.0f, 0.0f, 1.0f );
+	*outTexcoord = texcoord;
 }
 
 // Tessellates every 3x3 sub-patch of one MST_PATCH surface at a fixed
-// resolution and appends the result to the shared world vertex/normal
-// arrays - same flat, non-indexed triangle list as planar surfaces, so
-// no new pipeline/buffer/draw-call plumbing is needed.
+// resolution and appends the result to the shared world vertex/normal/
+// texcoord arrays - same flat, non-indexed triangle list as planar
+// surfaces, so no new pipeline/buffer/draw-call plumbing is needed.
 void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
-	std::vector<simd_float3> *outVerts, std::vector<simd_float3> *outNormals )
+	std::vector<simd_float3> *outVerts, std::vector<simd_float3> *outNormals, std::vector<simd_float2> *outTexcoords )
 {
 	int width = surf->patchWidth;
 	int height = surf->patchHeight;
@@ -105,6 +146,7 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 
 	simd_float3 gridPos[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
 	simd_float3 gridNorm[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
+	simd_float2 gridTex[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
 
 	for ( int py = 0; py < numPatchesY; py++ )
 	{
@@ -121,7 +163,7 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 				for ( int gu = 0; gu <= RT_PATCH_TESSELLATION; gu++ )
 				{
 					float u = (float)gu / (float)RT_PATCH_TESSELLATION;
-					RT_EvalBezierPatch3x3( ctrl, u, v, &gridPos[gv][gu], &gridNorm[gv][gu] );
+					RT_EvalBezierPatch3x3( ctrl, u, v, &gridPos[gv][gu], &gridNorm[gv][gu], &gridTex[gv][gu] );
 				}
 			}
 
@@ -135,6 +177,9 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 					outNormals->push_back( gridNorm[gv][gu] );
 					outNormals->push_back( gridNorm[gv][gu + 1] );
 					outNormals->push_back( gridNorm[gv + 1][gu + 1] );
+					outTexcoords->push_back( gridTex[gv][gu] );
+					outTexcoords->push_back( gridTex[gv][gu + 1] );
+					outTexcoords->push_back( gridTex[gv + 1][gu + 1] );
 
 					outVerts->push_back( gridPos[gv][gu] );
 					outVerts->push_back( gridPos[gv + 1][gu + 1] );
@@ -142,6 +187,9 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 					outNormals->push_back( gridNorm[gv][gu] );
 					outNormals->push_back( gridNorm[gv + 1][gu + 1] );
 					outNormals->push_back( gridNorm[gv + 1][gu] );
+					outTexcoords->push_back( gridTex[gv][gu] );
+					outTexcoords->push_back( gridTex[gv + 1][gu + 1] );
+					outTexcoords->push_back( gridTex[gv + 1][gu] );
 				}
 			}
 		}
@@ -169,49 +217,42 @@ static void RT_LoadWorld( const char *name )
 		return;
 	}
 
+	lump_t *shadersLump = Q_GetLumpByVersion( header, LUMP_SHADERS );
 	lump_t *surfsLump = Q_GetLumpByVersion( header, LUMP_SURFACES );
 	lump_t *vertsLump = Q_GetLumpByVersion( header, LUMP_DRAWVERTS );
 	lump_t *indexLump = Q_GetLumpByVersion( header, LUMP_DRAWINDEXES );
 
-	if ( surfsLump->filelen % sizeof( dsurface_t ) || vertsLump->filelen % sizeof( drawVert_t )
-		|| indexLump->filelen % sizeof( int ) )
+	if ( shadersLump->filelen % sizeof( dshader_t ) || surfsLump->filelen % sizeof( dsurface_t )
+		|| vertsLump->filelen % sizeof( drawVert_t ) || indexLump->filelen % sizeof( int ) )
 	{
 		ri.Printf( PRINT_ERROR, "renderer_metalrt: LoadWorld: \"%s\" has malformed lump sizes\n", name );
 		ri.FS_FreeFile( fileData );
 		return;
 	}
 
+	int numShaders = shadersLump->filelen / sizeof( dshader_t );
+	dshader_t *shaders = (dshader_t *)( fileData + shadersLump->fileofs );
 	int numSurfaces = surfsLump->filelen / sizeof( dsurface_t );
 	dsurface_t *surfaces = (dsurface_t *)( fileData + surfsLump->fileofs );
 	drawVert_t *allVerts = (drawVert_t *)( fileData + vertsLump->fileofs );
 	int *allIndexes = (int *)( fileData + indexLump->fileofs );
 
-	// Two passes, same shape as the real loader (tr_bsp.c R_LoadSurfaces):
-	// count first so the final buffer can be reserved close to its real
-	// size up front, then fill it - simpler than a growable buffer for a
-	// one-shot, load-time operation. (Patch surfaces still grow the
-	// vector dynamically past this reservation - their final vertex
-	// count depends on RT_PATCH_TESSELLATION, not worth a second exact
-	// pre-count for a load-time operation.)
-	int totalVerts = 0;
+	// Counting pass purely for the summary log line below - doesn't
+	// affect how the vectors are built (session 14 groups by shader
+	// instead of processing surfaces in file order, so a single
+	// up-front reservation size isn't meaningful the way it was before;
+	// std::vector grows dynamically, a one-shot load-time cost).
 	int numPlanarSurfaces = 0;
 	int numPatchSurfaces = 0;
 	int numSkippedSurfaces = 0;
 	for ( int i = 0; i < numSurfaces; i++ )
 	{
 		if ( surfaces[i].surfaceType == MST_PLANAR )
-		{
-			totalVerts += surfaces[i].numIndexes;
 			numPlanarSurfaces++;
-		}
 		else if ( surfaces[i].surfaceType == MST_PATCH )
-		{
 			numPatchSurfaces++;
-		}
 		else if ( surfaces[i].surfaceType != MST_BAD )
-		{
 			numSkippedSurfaces++;
-		}
 	}
 
 	if ( numSkippedSurfaces > 0 )
@@ -221,7 +262,7 @@ static void RT_LoadWorld( const char *name )
 			name, numPlanarSurfaces, numPatchSurfaces, numSkippedSurfaces );
 	}
 
-	if ( totalVerts == 0 && numPatchSurfaces == 0 )
+	if ( numPlanarSurfaces == 0 && numPatchSurfaces == 0 )
 	{
 		ri.FS_FreeFile( fileData );
 		return;
@@ -229,40 +270,96 @@ static void RT_LoadWorld( const char *name )
 
 	// Flat, non-indexed triangle list - simplest thing that reuses the
 	// existing entity pipeline's vertex layout (device float3
-	// *positions, parallel device float3 *normals) unchanged. World-space
-	// already; BSP vertex positions/normals need no per-surface
-	// transform.
+	// *positions, parallel device float3/float2 *normals/*texcoords)
+	// unchanged. World-space already; BSP vertex positions/normals need
+	// no per-surface transform.
+	//
+	// Session 14: built shader-by-shader rather than surface-by-surface
+	// (the previous sessions' order) so that each shader's geometry
+	// lands in one CONTIGUOUS range of these shared arrays - the
+	// non-indexed equivalent of an index buffer's per-surface
+	// offset/count, letting RT_DrawWorld issue one real-textured draw
+	// call per shader via vertexStart/vertexCount instead of per-vertex
+	// texture switching.
 	std::vector<simd_float3> worldVerts;
 	std::vector<simd_float3> worldNormals;
-	worldVerts.reserve( totalVerts );
-	worldNormals.reserve( totalVerts );
+	std::vector<simd_float2> worldTexcoords;
 
-	for ( int i = 0; i < numSurfaces; i++ )
+	numRtWorldGroups = 0;
+	int numTexturedGroups = 0;
+
+	for ( int shaderIdx = 0; shaderIdx < numShaders; shaderIdx++ )
 	{
-		dsurface_t *surf = &surfaces[i];
-		if ( surf->surfaceType != MST_PLANAR )
-			continue;
+		int groupStart = (int)worldVerts.size();
 
-		drawVert_t *surfVerts = allVerts + surf->firstVert;
-		int *surfIndexes = allIndexes + surf->firstIndex;
-
-		for ( int j = 0; j < surf->numIndexes; j++ )
+		for ( int i = 0; i < numSurfaces; i++ )
 		{
-			int vertIndex = surfIndexes[j];
-			if ( vertIndex < 0 || vertIndex >= surf->numVerts )
-				continue; // malformed index - skip rather than read out of bounds
+			dsurface_t *surf = &surfaces[i];
+			if ( surf->shaderNum != shaderIdx )
+				continue;
 
-			const float *xyz = surfVerts[vertIndex].xyz;
-			const float *normal = surfVerts[vertIndex].normal;
-			worldVerts.push_back( simd_make_float3( xyz[0], xyz[1], xyz[2] ) );
-			worldNormals.push_back( simd_make_float3( normal[0], normal[1], normal[2] ) );
+			if ( surf->surfaceType == MST_PLANAR )
+			{
+				drawVert_t *surfVerts = allVerts + surf->firstVert;
+				int *surfIndexes = allIndexes + surf->firstIndex;
+
+				for ( int j = 0; j < surf->numIndexes; j++ )
+				{
+					int vertIndex = surfIndexes[j];
+					if ( vertIndex < 0 || vertIndex >= surf->numVerts )
+						continue; // malformed index - skip rather than read out of bounds
+
+					const float *xyz = surfVerts[vertIndex].xyz;
+					const float *normal = surfVerts[vertIndex].normal;
+					const float *st = surfVerts[vertIndex].st;
+					worldVerts.push_back( simd_make_float3( xyz[0], xyz[1], xyz[2] ) );
+					worldNormals.push_back( simd_make_float3( normal[0], normal[1], normal[2] ) );
+					worldTexcoords.push_back( simd_make_float2( st[0], st[1] ) );
+				}
+			}
+			else if ( surf->surfaceType == MST_PATCH )
+			{
+				RT_TessellatePatchSurface( surf, allVerts, &worldVerts, &worldNormals, &worldTexcoords );
+			}
 		}
-	}
 
-	for ( int i = 0; i < numSurfaces; i++ )
-	{
-		if ( surfaces[i].surfaceType == MST_PATCH )
-			RT_TessellatePatchSurface( &surfaces[i], allVerts, &worldVerts, &worldNormals );
+		int groupCount = (int)worldVerts.size() - groupStart;
+		if ( groupCount == 0 )
+			continue; // no planar/patch surface in the map actually uses this shader
+
+		// Real .shader-script/direct-image resolution, exactly like
+		// rt_scene.mm's TIKI surface texturing (session 7-8) - most
+		// world shaders are more complex than a single map/clampmap
+		// stage (sky, fog, lightmap-blended multi-stage surfaces), so
+		// a nil result here is expected for many, not a bug; those
+		// groups draw through the flat-gray fallback pipeline instead,
+		// same as every world surface did before this session.
+		id<MTLTexture> texture = nil;
+		rtBlendMode_t blendMode = RT_BLEND_OPAQUE;
+		if ( shaders[shaderIdx].shader[0] != '\0' )
+		{
+			qhandle_t handle = RT_RegisterImageCommon( shaders[shaderIdx].shader );
+			if ( handle != 0 )
+			{
+				texture = RT_GetImageTexture( handle );
+				blendMode = RT_GetImageBlendMode( handle );
+				numTexturedGroups++;
+			}
+		}
+
+		if ( numRtWorldGroups < MAX_RT_WORLD_GROUPS )
+		{
+			rtWorldGroup_t *group = &rtWorldGroups[numRtWorldGroups++];
+			group->texture = texture;
+			group->blendMode = blendMode;
+			group->vertexStart = groupStart;
+			group->vertexCount = groupCount;
+		}
+		else
+		{
+			ri.Printf( PRINT_WARNING, "renderer_metalrt: LoadWorld: \"%s\" hit MAX_RT_WORLD_GROUPS (%d), "
+				"dropping shader \"%s\"'s geometry\n", name, MAX_RT_WORLD_GROUPS, shaders[shaderIdx].shader );
+		}
 	}
 
 	ri.FS_FreeFile( fileData );
@@ -280,9 +377,13 @@ static void RT_LoadWorld( const char *name )
 	rtWorldNormalBuffer = [RT_GetDevice() newBufferWithBytes:worldNormals.data()
 	                                                   length:worldNormals.size() * sizeof( simd_float3 )
 	                                                  options:MTLResourceStorageModeShared];
+	rtWorldTexcoordBuffer = [RT_GetDevice() newBufferWithBytes:worldTexcoords.data()
+	                                                     length:worldTexcoords.size() * sizeof( simd_float2 )
+	                                                    options:MTLResourceStorageModeShared];
 
-	ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar, %d patch surfaces, %d verts uploaded\n",
-		name, numPlanarSurfaces, numPatchSurfaces, rtWorldVertexCount );
+	ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar, %d patch surfaces, %d verts, "
+		"%d/%d shader groups textured\n",
+		name, numPlanarSurfaces, numPatchSurfaces, rtWorldVertexCount, numTexturedGroups, numRtWorldGroups );
 }
 
 void RT_DrawWorld( simd_float4x4 viewProj )
@@ -294,29 +395,55 @@ void RT_DrawWorld( simd_float4x4 viewProj )
 	if ( encoder == nil )
 		return;
 
-	[encoder setRenderPipelineState:RT_GetPipeline3D()];
-	[encoder setDepthStencilState:RT_GetDepthState3D()];
-	[encoder setVertexBuffer:rtWorldVertexBuffer offset:0 atIndex:0];
-
 	// No entity transform - world vertices are already in world space,
 	// so the model matrix is identity: MVP == viewProj, and normals need
 	// no rotation either (identity 3x3).
 	simd_float4x4 mvp = viewProj;
-	[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
-	[encoder setVertexBuffer:rtWorldNormalBuffer offset:0 atIndex:2];
 	simd_float3x3 identityNormalMatrix = {
 		simd_make_float3( 1, 0, 0 ), simd_make_float3( 0, 1, 0 ), simd_make_float3( 0, 0, 1 )
 	};
-	[encoder setVertexBytes:&identityNormalMatrix length:sizeof( identityNormalMatrix ) atIndex:3];
-
-	// Neutral gray, distinct from the entity placeholders' magenta -
-	// this is real (if untextured) level geometry, not a stand-in.
-	simd_float4 worldColor = simd_make_float4( 0.6f, 0.6f, 0.6f, 1.0f );
-	[encoder setFragmentBytes:&worldColor length:sizeof( worldColor ) atIndex:0];
 	simd_float3 lightDir = RT_GetLightDir();
-	[encoder setFragmentBytes:&lightDir length:sizeof( lightDir ) atIndex:1];
 
-	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:rtWorldVertexCount];
+	// Deliberately garish-distinct neutral gray (not the entity
+	// placeholders' magenta) for any shader group with no resolvable
+	// texture - most world shaders are more complex than this parser
+	// understands yet (session 14's rt_local.h comment), so this is the
+	// common case for many groups, not a bug.
+	simd_float4 worldColor = simd_make_float4( 0.6f, 0.6f, 0.6f, 1.0f );
+
+	// Session 14: real per-shader-group textures, mirroring
+	// rt_scene.mm's per-surface entity texturing (sessions 7-8) - one
+	// draw call per group, textured if a texture resolved, flat gray
+	// otherwise, all reading from the SAME shared vertex/normal/texcoord
+	// buffers via each group's own [vertexStart, vertexStart+vertexCount)
+	// range (there's no index buffer to slice instead).
+	bool haveTexturedPipeline = RT_EnsurePipelineTextured3D();
+
+	for ( int i = 0; i < numRtWorldGroups; i++ )
+	{
+		rtWorldGroup_t *group = &rtWorldGroups[i];
+
+		if ( group->texture != nil && haveTexturedPipeline )
+		{
+			RT_DrawTexturedGeometry( rtWorldVertexBuffer, rtWorldTexcoordBuffer, rtWorldNormalBuffer,
+				group->vertexStart, group->vertexCount, mvp, identityNormalMatrix,
+				group->texture, group->blendMode, lightDir );
+		}
+		else
+		{
+			[encoder setRenderPipelineState:RT_GetPipeline3D()];
+			[encoder setDepthStencilState:RT_GetDepthState3D()];
+			[encoder setVertexBuffer:rtWorldVertexBuffer offset:0 atIndex:0];
+			[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
+			[encoder setVertexBuffer:rtWorldNormalBuffer offset:0 atIndex:2];
+			[encoder setVertexBytes:&identityNormalMatrix length:sizeof( identityNormalMatrix ) atIndex:3];
+			[encoder setFragmentBytes:&worldColor length:sizeof( worldColor ) atIndex:0];
+			[encoder setFragmentBytes:&lightDir length:sizeof( lightDir ) atIndex:1];
+			[encoder drawPrimitives:MTLPrimitiveTypeTriangle
+			             vertexStart:group->vertexStart
+			             vertexCount:group->vertexCount];
+		}
+	}
 }
 
 void RT_InitWorldFunctions( refexport_t *re )

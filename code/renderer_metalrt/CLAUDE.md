@@ -152,6 +152,44 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 14 shipped: real world/BSP surface
+  texturing, closing the single biggest visual gap the GL1 before/after
+  comparison exposed - only entity models (sessions 7-8) had ever gotten
+  real textures; the map geometry itself always drew flat gray. Every
+  `dsurface_t` carries a `shaderNum` into the BSP's own `LUMP_SHADERS`
+  lump (`dshader_t::shader`, a name string) - `RT_LoadWorld`
+  (`rt_world.mm`) now groups planar/patch surfaces by shader instead of
+  processing them in file order, resolving each unique shader name
+  through the exact same `RT_RegisterImageCommon`/`.shader`-script
+  pipeline entity surfaces already use (sessions 7-8), and baking each
+  vertex's real UV from `drawVert_t::st` (planar) or interpolating it
+  via the same Bezier basis weights as position/normal (patches,
+  extending session 11's `RT_EvalBezierPatch3x3`). World geometry still
+  has no index buffer (session 4's original design - a flat, non-indexed
+  triangle list), so "per-surface texturing" here means grouping each
+  shader's surfaces into one CONTIGUOUS range of the shared vertex/
+  normal/texcoord arrays and drawing that range directly via
+  `vertexStart`/`vertexCount` - the non-indexed equivalent of
+  `rt_scene.mm`'s per-surface `indexOffset`/`indexCount`. Extracted a
+  new shared helper, `RT_DrawTexturedGeometry` (`rt_scene.mm`, moved
+  `RT_EnsurePipelineTextured3D` out of its anonymous namespace to expose
+  it too), so `rt_world.mm` reuses the exact same three pipeline
+  variants (opaque/alpha/additive, session 13) entities already use,
+  rather than a second copy. On the training map: 69 unique shaders in
+  use, 10 resolved a real texture (most world shaders are more complex
+  than a single map/clampmap stage - multi-stage lightmap blending, sky,
+  fog - well beyond this session's parser); those 59 unresolved groups
+  correctly fall back to the same flat-gray pipeline every world surface
+  used before this session, not a regression. Visually confirmed live:
+  tree/foliage geometry that previously blended into flat gray now shows
+  real, visible stippled texture detail. Stable for 4+ minutes, no
+  crash, no regression to lighting, entity texturing/blend-modes, or 2D
+  UI. Next: broader `.shader` stage support (specifically multi-stage/
+  lightmap-aware parsing, to raise that 10/69 ratio - the natural
+  continuation of this session), real LOD-adaptive patch subdivision,
+  real lightgrid-based lighting, or investigating the GL1-vs-metalrt FPS
+  gap (200 vs ~85-95, recorded but not yet investigated) are all open.
+
 - 2026-09-07: Post-unlock verification closed out both sessions 12 and
   13's deferred visual checks (the user's screen was locked for the
   entirety of both). Confirmed on the training map: session 12's

@@ -177,6 +177,12 @@ const char *rtShaderSourceTextured3D =
 	"    return float4(texColor.rgb * lighting, texColor.a);\n"
 	"}\n";
 
+} // namespace
+
+// Session 14: non-static (moved out of the anonymous namespace above,
+// where it originally lived) so rt_world.mm can also ensure/use the
+// textured pipelines for real world-surface texturing, not just
+// rt_scene.mm's entity surfaces.
 bool RT_EnsurePipelineTextured3D( void )
 {
 	if ( rtPipelineTextured3D != nil )
@@ -277,7 +283,47 @@ bool RT_EnsurePipelineTextured3D( void )
 	return true;
 }
 
-} // namespace
+// Session 14: a shared, non-indexed textured draw helper - both
+// rt_scene.mm's own per-entity-surface draws could use this, but they
+// already had their own (indexed) version before this session existed;
+// left as-is rather than unifying an indexed and non-indexed path into
+// one function. World geometry (rt_world.mm) has no index buffer at
+// all (session 4's design - a flat, non-indexed triangle list), so its
+// per-shader-group draws call this instead.
+void RT_DrawTexturedGeometry( id<MTLBuffer> vertexBuffer, id<MTLBuffer> texcoordBuffer, id<MTLBuffer> normalBuffer,
+	int vertexStart, int vertexCount, simd_float4x4 mvp, simd_float3x3 normalMatrix,
+	id<MTLTexture> texture, rtBlendMode_t blendMode, simd_float3 lightDir )
+{
+	id<MTLRenderCommandEncoder> encoder = RT_GetCurrentEncoder();
+	if ( encoder == nil )
+		return;
+
+	id<MTLRenderPipelineState> pipeline = rtPipelineTextured3D;
+	id<MTLDepthStencilState> depthState = rtDepthState3D;
+	if ( blendMode == RT_BLEND_ALPHA )
+	{
+		pipeline = rtPipelineTexturedAlpha3D;
+		depthState = rtDepthStateBlended3D;
+	}
+	else if ( blendMode == RT_BLEND_ADDITIVE )
+	{
+		pipeline = rtPipelineTexturedAdditive3D;
+		depthState = rtDepthStateBlended3D;
+	}
+
+	[encoder setRenderPipelineState:pipeline];
+	[encoder setDepthStencilState:depthState];
+	[encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
+	[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
+	[encoder setVertexBuffer:texcoordBuffer offset:0 atIndex:2];
+	[encoder setVertexBuffer:normalBuffer offset:0 atIndex:3];
+	[encoder setVertexBytes:&normalMatrix length:sizeof( normalMatrix ) atIndex:4];
+	[encoder setFragmentTexture:texture atIndex:0];
+	[encoder setFragmentSamplerState:rtSamplerTextured3D atIndex:0];
+	[encoder setFragmentBytes:&lightDir length:sizeof( lightDir ) atIndex:0];
+
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:vertexStart vertexCount:vertexCount];
+}
 
 // Non-static so rt_world.mm can reuse the same pipeline/depth state
 // (world geometry and entity placeholders share both) rather than
