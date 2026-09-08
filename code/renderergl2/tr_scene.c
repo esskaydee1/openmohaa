@@ -22,6 +22,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include "tr_local.h"
 
+#ifdef RENDERER_METAL_OVERLAY
+// tr_metal_overlay.mm (Metal renderer target only, see
+// cmake/renderer_metal.cmake) - captures this frame's real camera
+// parameters for the real-time ray-traced shadow overlay layer.
+void RT_OverlayUpdateCamera( const refdef_t *fd );
+#endif
+
 int			r_firstSceneDrawSurf;
 
 int			r_numdlights;
@@ -532,6 +539,12 @@ void RE_RenderScene( const refdef_t *fd ) {
 	}
 
 	startTime = ri.Milliseconds();
+
+#ifdef RENDERER_METAL_OVERLAY
+	if ( !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
+		RT_OverlayUpdateCamera( fd );
+	}
+#endif
 
 	if (!tr.world && !( fd->rdflags & RDF_NOWORLDMODEL ) ) {
 		ri.Error (ERR_DROP, "R_RenderScene: NULL worldmodel");

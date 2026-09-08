@@ -80,11 +80,6 @@ function(finish_macos_app)
             set_output_dirs(${RENDERER_METAL_BINARY} SUBDIRECTORY ${MACOS_APP_BINARY_DIR})
             add_dependencies(${CLIENT_BINARY} ${RENDERER_METAL_BINARY})
         endif()
-
-        if(BUILD_RENDERER_METALRT)
-            set_output_dirs(${RENDERER_METALRT_BINARY} SUBDIRECTORY ${MACOS_APP_BINARY_DIR})
-            add_dependencies(${CLIENT_BINARY} ${RENDERER_METALRT_BINARY})
-        endif()
     endif()
 endfunction()
 

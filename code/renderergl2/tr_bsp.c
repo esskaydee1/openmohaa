@@ -24,6 +24,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "tr_local.h"
 #include "tr_vis.h"
 
+#ifdef RENDERER_METAL_OVERLAY
+// tr_metal_overlay.mm (Metal renderer target only, see
+// cmake/renderer_metal.cmake) - builds the real-time ray-traced shadow
+// overlay's acceleration structure from tr.world once it's fully loaded.
+void RT_OverlayBuildWorldAccelStructure( void );
+#endif
+
 #define JSON_IMPLEMENTATION
 #include "../qcommon/json.h"
 #undef JSON_IMPLEMENTATION
@@ -3737,6 +3744,10 @@ void RE_LoadWorldMap( const char *name ) {
     R_VisDebugLoad(name);
     ri.UI_LoadResource("*116");
     //=========================
+
+#ifdef RENDERER_METAL_OVERLAY
+	RT_OverlayBuildWorldAccelStructure();
+#endif
 }
 
 //

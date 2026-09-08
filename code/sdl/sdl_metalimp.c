@@ -55,6 +55,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include "../sys/sys_local.h"
 #include "sdl_icon.h"
 
+// tr_metal_overlay.mm - real-time ray-traced shadow overlay, a separate
+// CAMetalLayer composited above ANGLE's own layer by the window server.
+// Does NOT touch anything else in this file's EGL surface/context/swap
+// setup - see tr_metal_overlay.mm's own top comment for why.
+void RT_OverlayInit( void *sdlMetalLayer );
+void RT_OverlayRenderAndPresent( void );
+void RT_OverlayResize( int width, int height );
+
 typedef enum
 {
 	RSERR_OK,
@@ -791,6 +799,12 @@ static int GLimp_SetMode(int mode, qboolean fullscreen, qboolean noborder)
 		return RSERR_INVALID_MODE;
 	}
 
+	// Purely additive - a separate CAMetalLayer sibling composited above
+	// metalLayer by the window server. Any failure inside logs its own
+	// warning and leaves the overlay disabled; it never affects ANGLE's
+	// own rendering below it.
+	RT_OverlayInit( metalLayer );
+
 	if ( !GLimp_GetProcAddresses() )
 	{
 		ri.Printf( PRINT_ALL, "GLimp_GetProcAddresses() failed\n" );
@@ -1078,6 +1092,12 @@ void GLimp_EndFrame( void )
 	{
 		eglSwapBuffers( eglDisplay, eglSurface );
 	}
+
+	// Separate command queue, separate CAMetalLayer, separate drawable -
+	// this never touches eglSurface/eglDisplay above. A no-op until the
+	// world's acceleration structure and the first frame's camera are
+	// both available (RT_OverlayRenderAndPresent checks both itself).
+	RT_OverlayRenderAndPresent();
 
 	if( r_fullscreen->modified )
 	{

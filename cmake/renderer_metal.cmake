@@ -59,6 +59,7 @@ set(RENDERER_METAL_SOURCES
     ${SOURCE_DIR}/renderergl2/tr_vbo.c
     ${SOURCE_DIR}/renderergl2/tr_vis.cpp
     ${SOURCE_DIR}/renderergl2/tr_world.c
+    ${SOURCE_DIR}/renderergl2/tr_metal_overlay.mm
 )
 
 file(GLOB RENDERER_METAL_SHADER_SOURCES ${SOURCE_DIR}/renderergl2/glsl/*.glsl)
@@ -117,9 +118,17 @@ if(USE_RENDERER_DLOPEN)
     # runtime like the other renderers, so this doesn't affect them.
     set_target_properties(${RENDERER_METAL_BINARY} PROPERTIES OSX_ARCHITECTURES "arm64")
 
-    target_link_libraries(      ${RENDERER_METAL_BINARY} PRIVATE ${RENDERER_LIBRARIES} ${ANGLE_LIBRARIES})
+    # -framework Metal/QuartzCore: only tr_metal_overlay.mm needs these
+    # (the real-time ray-traced shadow overlay layer) - scoped to just
+    # this target, not the shared RENDERER_LIBRARIES list, so GL1/GL2
+    # don't pick up a Metal dependency they have no use for.
+    target_link_libraries(      ${RENDERER_METAL_BINARY} PRIVATE ${RENDERER_LIBRARIES} ${ANGLE_LIBRARIES} "-framework Metal" "-framework QuartzCore")
     target_include_directories( ${RENDERER_METAL_BINARY} PRIVATE ${RENDERER_INCLUDE_DIRS} ${ANGLE_DIR}/include)
-    target_compile_definitions( ${RENDERER_METAL_BINARY} PRIVATE ${RENDERER_DEFINITIONS})
+    # RENDERER_METAL_OVERLAY guards the RT_Overlay* call sites added to
+    # tr_scene.c/tr_bsp.c (shared with renderer_opengl2 - without this
+    # guard, those calls would be undefined symbols in the GL2 build,
+    # which never links tr_metal_overlay.mm).
+    target_compile_definitions( ${RENDERER_METAL_BINARY} PRIVATE ${RENDERER_DEFINITIONS} RENDERER_METAL_OVERLAY)
     target_compile_options(     ${RENDERER_METAL_BINARY} PRIVATE ${RENDERER_COMPILE_OPTIONS})
     target_link_options(        ${RENDERER_METAL_BINARY} PRIVATE ${RENDERER_LINK_OPTIONS})
 
