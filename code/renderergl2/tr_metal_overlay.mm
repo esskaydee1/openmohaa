@@ -428,9 +428,22 @@ extern "C" void RT_OverlayRenderAndPresent( void )
 	// comparison against plain ANGLE/GL2 rendering - not a maintained
 	// permanent option, just a way to verify what this layer is
 	// actually contributing without needing two separate builds.
+	//
+	// Defaults OFF: measured on the training map (same camera, on vs.
+	// off) that with the baked lightmap still active underneath, 35% of
+	// the frame gets meaningfully darkened by this overlay, and over a
+	// quarter of that (27% of the darkened pixels, ~21/255 of extra
+	// darkening on average) lands on areas GL2's own bake had already
+	// correctly shadowed - real double-darkening, not just redundant
+	// work. Only ~20% of the overlay's effect falls on baseline-bright
+	// pixels, i.e. is plausibly new information rather than compounding
+	// an existing correct shadow. Doing this right needs the baked
+	// lightmap's contribution removed where the ray tracer takes over,
+	// not layered under it - real follow-up work, not a default-on
+	// feature in the meantime.
 	static cvar_t *r_metalShadowOverlay = NULL;
 	if ( r_metalShadowOverlay == NULL )
-		r_metalShadowOverlay = ri.Cvar_Get( "r_metalShadowOverlay", "1", 0 );
+		r_metalShadowOverlay = ri.Cvar_Get( "r_metalShadowOverlay", "0", 0 );
 	if ( !r_metalShadowOverlay->integer )
 		return;
 
