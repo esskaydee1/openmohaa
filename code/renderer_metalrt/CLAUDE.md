@@ -152,6 +152,36 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 15 shipped: real JPG image decoding,
+  closing most of session 14's 59/69 unresolved-shader gap in one move.
+  Hypothesis going in: the original 2002 MOHAA assets mix TGA and JPG
+  textures freely, so many of those 59 unresolved world shaders were
+  probably blocked on missing JPG decoding, not `.shader`-script parsing
+  depth. Confirmed vendored `code/thirdparty/jpeg-9f` (full libjpeg 9f)
+  and `code/renderercommon/tr_image_jpg.c`'s `R_LoadJPG` (same
+  `(name, byte**, int*, int*)` signature as the already-working TGA/BMP/
+  PCX loaders, already outputs RGBA with alpha forced to 255) needed zero
+  downstream changes - purely an additive loader. `cmake/renderer_metalrt.cmake`
+  now builds `tr_image_jpg.c` plus a glob of `jpeg-9f/j*.c` (mirroring
+  `cmake/libraries/jpeg.cmake`'s existing GL1/GL2 `USE_INTERNAL_JPEG`
+  pattern, `disable_warnings()`'d since it's third-party), and
+  `rt_image.mm`'s `RT_LoadImageFile` loader table gained a `{"jpg",
+  R_LoadJPG}` entry. Linked clean on the first build - no symbol
+  collisions with the vendored jpeg sources. On the training map:
+  `LoadWorld`'s shader-group texturing jumped from session 14's 10/69 to
+  **63/69** - confirming the hypothesis; the remaining 6 are still the
+  genuinely complex multi-stage/lightmap/sky/fog shaders session 14
+  already called out as out of scope for the current `.shader` parser.
+  Stable 2.5+ minutes, no crash. Not visually confirmed this session -
+  the user's screen was locked again at test time (same recurring
+  blocker as sessions 12-13) - verification relied on the LoadWorld log
+  line and process stability; a live pixel check is still owed whenever
+  the screen next unlocks. Next: PNG support (the other common format
+  gap, needs puff.c's inflate), broader `.shader` multi-stage/lightmap-
+  aware parsing for the remaining 6, real LOD-adaptive patch subdivision,
+  real lightgrid-based lighting, or the GL1-vs-metalrt FPS gap - all
+  still open.
+
 - 2026-09-07: Phase 1, session 14 shipped: real world/BSP surface
   texturing, closing the single biggest visual gap the GL1 before/after
   comparison exposed - only entity models (sessions 7-8) had ever gotten

@@ -15,15 +15,20 @@ other renderers use, which never touch GL/qgl themselves.
 
 // Renderer-agnostic image decoders (code/renderercommon/), pure
 // filesystem + memory (ri.FS_ReadFile/ri.Malloc/ri.Error) - no GL calls,
-// safe to use unchanged from a native Metal renderer. Only the
-// dependency-free formats this session (TGA/BMP/PCX are plain C, no
-// external library); JPG needs libjpeg and PNG needs puff.c's inflate -
-// both real, but a separate CMake-wiring session, not bundled into
-// "get RegisterShader/DrawStretchPic working" for the first time.
+// safe to use unchanged from a native Metal renderer. TGA/BMP/PCX are
+// plain C, no external library (session 2). JPG (session 15) needs
+// libjpeg - always the vendored thirdparty/jpeg-9f source
+// (cmake/renderer_metalrt.cmake), not a system libjpeg, to keep this
+// renderer's build self-contained; R_LoadJPG already outputs RGBA
+// (4 bytes/pixel, alpha forced to 255) exactly like the other three
+// loaders, so it's a drop-in addition to RT_LoadImageFile below with no
+// changes needed anywhere else in the pipeline. PNG (needs puff.c's
+// inflate) is still real, separate follow-up work.
 extern "C" {
 void R_LoadTGA( const char *name, byte **pic, int *width, int *height );
 void R_LoadBMP( const char *name, byte **pic, int *width, int *height );
 void R_LoadPCX( const char *name, byte **pic, int *width, int *height );
+void R_LoadJPG( const char *name, byte **pic, int *width, int *height );
 }
 
 namespace {
@@ -348,6 +353,7 @@ byte *RT_LoadImageFile( const char *name, int *width, int *height )
 		{ "tga", R_LoadTGA },
 		{ "bmp", R_LoadBMP },
 		{ "pcx", R_LoadPCX },
+		{ "jpg", R_LoadJPG },
 	};
 
 	if ( ext && *ext )
