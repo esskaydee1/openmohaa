@@ -62,6 +62,13 @@ id<MTLDevice> RT_GetDevice( void );
 // RE_BeginFrame/RE_EndFrame, or nil outside of one - draw calls between
 // those two calls encode into this.
 id<MTLRenderCommandEncoder> RT_GetCurrentEncoder( void );
+// Session 24: the shared command queue, for rt_raytrace.mm's compute
+// dispatch - it needs its OWN command buffer (a compute encoder can't
+// share the render encoder RE_BeginFrame already has open across the
+// frame), submitted to this same queue so it executes before the main
+// per-frame command buffer that samples its output (same-queue command
+// buffers execute in commit order).
+id<MTLCommandQueue> RT_GetQueue( void );
 #endif
 
 // One-time-per-call-site logging for functions that aren't implemented

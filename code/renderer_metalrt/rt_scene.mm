@@ -369,6 +369,113 @@ void RT_DrawTexturedGeometry( id<MTLBuffer> vertexBuffer, id<MTLBuffer> texcoord
 	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:vertexStart vertexCount:vertexCount];
 }
 
+// Session 23: real per-surface lightmaps (rt_world.mm's LUMP_LIGHTMAPS
+// read). No normal/normalMatrix/lightDir here at all - unlike the flat
+// directional-light path above, a lightmap already IS the final baked
+// shading for this surface, computed by the level compiler from the
+// real 3D scene (including self-occlusion a single global light
+// direction structurally can't represent); adding a second dynamic
+// light on top would double up lighting, not improve it. Opaque only
+// (world geometry with a real lightmap is always the base/opaque pass
+// in practice - alpha/additive surfaces use the existing diffuse-only
+// path instead, unchanged).
+id<MTLRenderPipelineState> rtPipelineLightmap3D = nil;
+id<MTLSamplerState> rtSamplerLightmap3D = nil;
+
+const char *rtShaderSourceLightmap3D =
+	"#include <metal_stdlib>\n"
+	"using namespace metal;\n"
+	"struct VertexOutLM { float4 position [[position]]; float2 texcoord; float2 lmTexcoord; };\n"
+	"vertex VertexOutLM rt_vertex_3d_lightmap(uint vertexID [[vertex_id]],\n"
+	"    const device float3 *positions [[buffer(0)]],\n"
+	"    constant float4x4 &mvp [[buffer(1)]],\n"
+	"    const device float2 *texcoords [[buffer(2)]],\n"
+	"    const device float2 *lmTexcoords [[buffer(3)]]) {\n"
+	"    VertexOutLM out;\n"
+	"    out.position = mvp * float4(positions[vertexID], 1.0);\n"
+	"    out.texcoord = texcoords[vertexID];\n"
+	"    out.lmTexcoord = lmTexcoords[vertexID];\n"
+	"    return out;\n"
+	"}\n"
+	"fragment float4 rt_fragment_3d_lightmap(VertexOutLM in [[stage_in]],\n"
+	"    texture2d<float> tex [[texture(0)]], sampler samp [[sampler(0)]],\n"
+	"    texture2d<float> lightmapTex [[texture(1)]], sampler lmSamp [[sampler(1)]]) {\n"
+	"    float4 texColor = tex.sample(samp, in.texcoord);\n"
+	"    float3 lmColor = lightmapTex.sample(lmSamp, in.lmTexcoord).rgb;\n"
+	// Overbright x4 (idtech3's standard r_mapOverBrightBits default is 2,
+	// i.e. 2^2): lightmaps are authored assuming a hardware overbright
+	// multiply at render time (GL1's gamma-ramp trick, or GL2's shader-
+	// side equivalent) - this renderer has neither, so a straight
+	// multiply reads too dark against the original. Measured: this
+	// map's real lightmap tiles average ~20-65/255 raw - x2 (a first,
+	// too-conservative guess) still left surfaces looking near-black.
+	"    float3 color = texColor.rgb * lmColor * 4.0;\n"
+	"    return float4(color, texColor.a);\n"
+	"}\n";
+
+bool RT_EnsurePipelineLightmap3D( void )
+{
+	if ( rtPipelineLightmap3D != nil )
+		return true;
+
+	id<MTLDevice> device = RT_GetDevice();
+
+	NSError *error = nil;
+	id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:rtShaderSourceLightmap3D]
+	                                                options:nil
+	                                                  error:&error];
+	if ( library == nil )
+	{
+		ri.Printf( PRINT_ERROR, "renderer_metalrt: failed to compile lightmap 3D shader: %s\n",
+			error ? [[error localizedDescription] UTF8String] : "unknown error" );
+		return false;
+	}
+
+	MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
+	desc.vertexFunction = [library newFunctionWithName:@"rt_vertex_3d_lightmap"];
+	desc.fragmentFunction = [library newFunctionWithName:@"rt_fragment_3d_lightmap"];
+	desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+
+	rtPipelineLightmap3D = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+	if ( rtPipelineLightmap3D == nil )
+	{
+		ri.Printf( PRINT_ERROR, "renderer_metalrt: failed to create lightmap 3D pipeline: %s\n",
+			error ? [[error localizedDescription] UTF8String] : "unknown error" );
+		return false;
+	}
+
+	MTLSamplerDescriptor *samplerDesc = [[MTLSamplerDescriptor alloc] init];
+	samplerDesc.minFilter = MTLSamplerMinMagFilterLinear;
+	samplerDesc.magFilter = MTLSamplerMinMagFilterLinear;
+	samplerDesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+	samplerDesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+	rtSamplerLightmap3D = [device newSamplerStateWithDescriptor:samplerDesc];
+
+	return true;
+}
+
+void RT_DrawLightmappedGeometry( id<MTLBuffer> vertexBuffer, id<MTLBuffer> texcoordBuffer, id<MTLBuffer> lightmapTexcoordBuffer,
+	int vertexStart, int vertexCount, simd_float4x4 mvp, id<MTLTexture> texture, id<MTLTexture> lightmapTexture )
+{
+	id<MTLRenderCommandEncoder> encoder = RT_GetCurrentEncoder();
+	if ( encoder == nil )
+		return;
+
+	[encoder setRenderPipelineState:rtPipelineLightmap3D];
+	[encoder setDepthStencilState:rtDepthState3D];
+	[encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
+	[encoder setVertexBytes:&mvp length:sizeof( mvp ) atIndex:1];
+	[encoder setVertexBuffer:texcoordBuffer offset:0 atIndex:2];
+	[encoder setVertexBuffer:lightmapTexcoordBuffer offset:0 atIndex:3];
+	[encoder setFragmentTexture:texture atIndex:0];
+	[encoder setFragmentSamplerState:rtSamplerTextured3D atIndex:0];
+	[encoder setFragmentTexture:lightmapTexture atIndex:1];
+	[encoder setFragmentSamplerState:rtSamplerLightmap3D atIndex:1];
+
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:vertexStart vertexCount:vertexCount];
+}
+
 // Non-static so rt_world.mm can reuse the same pipeline/depth state
 // (world geometry and entity placeholders share both) rather than
 // standing up a second, near-identical copy.
@@ -888,6 +995,15 @@ static void RT_AddRefEntityToScene( const refEntity_t *re, int parentEntityNumbe
 // (RT_GetPipeline3D/RT_GetDepthState3D/RT_EnsurePipeline3D) rather than
 // standing up a second, near-identical one for world geometry.
 void RT_DrawWorld( simd_float4x4 viewProj );
+// Session 22: needs the raw view/proj separately (not the combined
+// viewProj RT_DrawWorld takes) so it can strip translation from the
+// view before combining them itself - see rt_world.mm.
+void RT_DrawSky( simd_float4x4 view, simd_float4x4 proj );
+// Session 24: real ray tracing - see rt_raytrace.mm. Replaces
+// RT_DrawSky+RT_DrawWorld for the base scene (entities still rasterize
+// on top, unchanged, until they're added to the acceleration structure
+// too).
+void RT_DrawRayTracedWorld( const vec3_t vieworg, const vec3_t viewaxis[3], float fovXDeg, float fovYDeg, simd_float3 lightDir );
 
 static void RT_RenderScene( const refdef_t *fd )
 {
@@ -908,10 +1024,31 @@ static void RT_RenderScene( const refdef_t *fd )
 	simd_float4x4 proj = RT_BuildProjectionMatrix( fd->fov_x, fd->fov_y, nearZ, farZ );
 	simd_float4x4 viewProj = simd_mul( proj, view );
 
-	// World geometry first (see rt_world.mm) - it's the background;
-	// entity placeholders draw on top of it, correctly depth-tested
-	// against it either way since both go through the same depth state.
-	RT_DrawWorld( viewProj );
+	// Session 24: r_metalrtRaytrace toggles between the new ray-traced
+	// world pass and the original rasterized sky+world path - kept as a
+	// live switch (not a straight replacement) specifically to allow a
+	// same-build, same-vantage-point before/after comparison, not as a
+	// long-term maintained fallback.
+	static cvar_t *r_metalrtRaytrace = NULL;
+	if ( r_metalrtRaytrace == NULL )
+		r_metalrtRaytrace = ri.Cvar_Get( "r_metalrtRaytrace", "1", 0 );
+
+	if ( r_metalrtRaytrace->integer )
+	{
+		RT_DrawRayTracedWorld( fd->vieworg, fd->viewaxis, fd->fov_x, fd->fov_y, RT_GetLightDir() );
+	}
+	else
+	{
+		// Sky first (see rt_world.mm) - it's the furthest-back background,
+		// drawn with depth write disabled so world geometry and entities
+		// both correctly draw over it via their own normal depth test.
+		RT_DrawSky( view, proj );
+
+		// World geometry next - the near background; entity placeholders
+		// draw on top of it, correctly depth-tested against it either way
+		// since both go through the same depth state.
+		RT_DrawWorld( viewProj );
+	}
 
 	if ( numRtSceneEntities == 0 )
 		return;

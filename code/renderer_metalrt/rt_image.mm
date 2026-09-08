@@ -186,6 +186,17 @@ bool RT_EnsurePipeline2D( void )
 	return true;
 }
 
+} // namespace
+
+// Session 22: RT_LoadImageFile and RT_FindShaderSkyParms below need
+// external linkage (rt_world.mm's skybox loader calls both directly) -
+// everything from here on is intentionally outside the anonymous
+// namespace above for that reason, not just historical layout. Nothing
+// below this point touches rtImages[]/numRtImages or any other state
+// that still needs to stay internal (those functions - RT_RegisterImageCommon,
+// RT_GetImageTexture, RT_GetImageBlendMode - already live past the
+// anonymous namespace too, further down this file).
+
 // Session 13: classifies a shader's `blendfunc` line into one of 3
 // buckets (see rtBlendMode_t, rt_local.h) - mirrors ParseStage's own
 // "simple blends first, then complex double blends" dispatch
@@ -344,6 +355,92 @@ bool RT_FindShaderScriptTexture( const char *shaderName, char *outPath, size_t o
 	return found;
 }
 
+// Session 22: a sky shader (e.g. textures/sky/mohday2) has no map/
+// clampmap stage at all - just `skyParms <basePath> <cloudHeight>
+// <box>` at the shader-block's top level - so RT_FindShaderScriptTexture
+// above correctly never finds a texture for one (not a bug, that
+// function's whole job is finding a map/clampmap stage). Kept as its
+// own separate scan, rather than folded into that function with more
+// out-parameters, so world-shader sky detection (rt_world.mm, the only
+// caller) can't accidentally perturb the already-working texture/
+// blendfunc/alphafunc resolution every other caller (2D UI, entities)
+// depends on. Only the base path is extracted - cloudHeight and the
+// box/terrain-fog parameter aren't used by this renderer's skybox.
+bool RT_FindShaderSkyParms( const char *shaderName, char *outBasePath, size_t outBasePathSize )
+{
+	int numFiles = 0;
+	char **fileList = ri.FS_ListFiles( "scripts", ".shader", &numFiles );
+	if ( fileList == NULL )
+		return false;
+
+	bool found = false;
+
+	for ( int f = 0; f < numFiles && !found; f++ )
+	{
+		char fullPath[MAX_QPATH];
+		Com_sprintf( fullPath, sizeof( fullPath ), "scripts/%s", fileList[f] );
+
+		byte *fileData = NULL;
+		long fileLen = ri.FS_ReadFile( fullPath, (void **)&fileData );
+		if ( fileLen <= 0 || fileData == NULL )
+			continue;
+
+		char *p = (char *)fileData;
+		while ( true )
+		{
+			char *token = COM_ParseExt( &p, qtrue );
+			if ( token[0] == '\0' )
+				break;
+
+			if ( Q_stricmp( token, shaderName ) != 0 )
+			{
+				SkipBracedSection( &p, 0 );
+				continue;
+			}
+
+			char *openBrace = COM_ParseExt( &p, qtrue );
+			if ( Q_stricmp( openBrace, "{" ) != 0 )
+				break;
+
+			int depth = 1;
+			while ( depth > 0 )
+			{
+				char *tok = COM_ParseExt( &p, qtrue );
+				if ( tok[0] == '\0' )
+					break;
+
+				if ( !Q_stricmp( tok, "{" ) )
+				{
+					depth++;
+					continue;
+				}
+				if ( !Q_stricmp( tok, "}" ) )
+				{
+					depth--;
+					continue;
+				}
+
+				if ( !Q_stricmp( tok, "skyparms" ) )
+				{
+					char *arg = COM_ParseExt( &p, qfalse );
+					if ( arg[0] != '\0' && Q_stricmp( arg, "-" ) != 0 )
+					{
+						Q_strncpyz( outBasePath, arg, outBasePathSize );
+						found = true;
+					}
+				}
+			}
+
+			break; // done with this shader block
+		}
+
+		ri.FS_FreeFile( fileData );
+	}
+
+	ri.FS_FreeFileList( fileList );
+	return found;
+}
+
 // RegisterShader treats its name as a direct image path, trying common
 // extensions in turn if the name doesn't already have one - the same
 // job R_LoadImage does in the existing renderers, minus DDS/S3TC (no
@@ -421,9 +518,7 @@ id<MTLTexture> RT_CreateTexture( const byte *rgba, int width, int height )
 	return texture;
 }
 
-} // namespace
-
-// Not anonymous-namespace-scoped: rt_scene.mm's session-7 model-texturing
+// rt_scene.mm's session-7 model-texturing
 // bake step calls this directly (with a TIKI surface's shader name
 // instead of a UI DrawStretchPic image path) to reuse the same
 // direct-image-file loader rather than duplicating it. Still freely

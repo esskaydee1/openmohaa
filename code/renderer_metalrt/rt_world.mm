@@ -36,6 +36,14 @@ bool RT_EnsurePipelineTextured3D( void );
 void RT_DrawTexturedGeometry( id<MTLBuffer> vertexBuffer, id<MTLBuffer> texcoordBuffer, id<MTLBuffer> normalBuffer,
 	int vertexStart, int vertexCount, simd_float4x4 mvp, simd_float3x3 normalMatrix,
 	id<MTLTexture> texture, rtBlendMode_t blendMode, simd_float3 lightDir );
+// Session 23: real per-surface lightmaps - see rt_scene.mm.
+bool RT_EnsurePipelineLightmap3D( void );
+void RT_DrawLightmappedGeometry( id<MTLBuffer> vertexBuffer, id<MTLBuffer> texcoordBuffer, id<MTLBuffer> lightmapTexcoordBuffer,
+	int vertexStart, int vertexCount, simd_float4x4 mvp, id<MTLTexture> texture, id<MTLTexture> lightmapTexture );
+// Session 24: real ray tracing - see rt_raytrace.mm. Built once per
+// LoadWorld (world geometry doesn't change mid-map), from the same
+// vertex buffer rasterization already produces.
+void RT_BuildWorldAccelStructure( void );
 
 // rt_image.mm (not anonymous-namespace-scoped there) - session 14
 // reuses these to resolve a world surface's shader name to a texture
@@ -43,6 +51,17 @@ void RT_DrawTexturedGeometry( id<MTLBuffer> vertexBuffer, id<MTLBuffer> texcoord
 qhandle_t RT_RegisterImageCommon( const char *name );
 id<MTLTexture> RT_GetImageTexture( qhandle_t handle );
 rtBlendMode_t RT_GetImageBlendMode( qhandle_t handle );
+
+// rt_image.mm - session 22's skybox needs both the raw pixel loader
+// (for its 6 cube faces, not registered as ordinary 2D shader handles)
+// and the sky-specific shader-script scan (a sky shader has no map/
+// clampmap stage, so RT_RegisterImageCommon above correctly never
+// resolves one to a texture handle).
+byte *RT_LoadImageFile( const char *name, int *width, int *height );
+bool RT_FindShaderSkyParms( const char *shaderName, char *outBasePath, size_t outBasePathSize );
+// Session 23: also reused directly for lightmap tiles (RGBA upload,
+// same as any other 2D texture) - no reason to duplicate this.
+id<MTLTexture> RT_CreateTexture( const byte *rgba, int width, int height );
 
 namespace {
 
@@ -52,7 +71,24 @@ id<MTLBuffer> rtWorldNormalBuffer = nil;
 // always baked (from drawVert_t::st, already present in the BSP data),
 // same reasoning as rt_scene.mm's TIKI texcoord buffer.
 id<MTLBuffer> rtWorldTexcoordBuffer = nil;
+// Session 23: parallel again - drawVert_t::lightmap, the SECOND (real,
+// pre-baked) set of texcoords every lightmapped surface's vertices
+// already carry. Always baked alongside worldTexcoords regardless of
+// whether a given group ends up using it (simplest - a group without a
+// real lightmap for this shader just never binds this buffer/pipeline).
+id<MTLBuffer> rtWorldLightmapTexcoordBuffer = nil;
+// Session 24: one simd_float3 per TRIANGLE (not per vertex) - see
+// RT_GetAverageTextureColor below.
+id<MTLBuffer> rtWorldTriangleColorBuffer = nil;
 int rtWorldVertexCount = 0;
+
+// Session 23: real per-tile lightmap textures, see RT_LoadWorld's lump
+// read - one real Metal texture per LUMP_LIGHTMAPS tile, indexed
+// directly by dsurface_t::lightmapNum/cTerraPatch_t::iLightMap.
+#define RT_LIGHTMAP_SIZE 128
+#define MAX_RT_LIGHTMAPS 256
+id<MTLTexture> rtLightmapTextures[MAX_RT_LIGHTMAPS];
+int numRtLightmapTextures = 0;
 
 // Session 14: one real texture (or nil - flat gray fallback, most
 // .shader-script names still don't resolve to a direct image or a
@@ -64,14 +100,21 @@ int rtWorldVertexCount = 0;
 // RANGE per shader (built by processing surfaces shader-by-shader,
 // not surface-by-surface) is the non-indexed equivalent of
 // rt_scene.mm's per-surface indexOffset/indexCount.
+// Session 23: now grouped by (shaderIdx, lightmapNum) pairs, not just
+// shaderIdx - two surfaces can share a diffuse shader but use different
+// baked lightmap tiles, and each needs its own draw call to bind the
+// right lightmap texture. lightmapTexture is nil for groups with no
+// real lightmap (LIGHTMAP_NONE, or terrain - see RT_LoadWorld), which
+// keep using the existing flat-directional-light path unchanged.
 struct rtWorldGroup_t {
 	id<MTLTexture> texture;
+	id<MTLTexture> lightmapTexture;
 	rtBlendMode_t blendMode;
 	int vertexStart;
 	int vertexCount;
 };
 
-#define MAX_RT_WORLD_GROUPS 1024
+#define MAX_RT_WORLD_GROUPS 2048
 rtWorldGroup_t rtWorldGroups[MAX_RT_WORLD_GROUPS];
 int numRtWorldGroups = 0;
 
@@ -96,7 +139,7 @@ const int RT_MAX_PATCH_DIM = 64; // sanity bound against a malformed BSP, not a 
 // (MakeMeshNormals in the real engine) - a reasonable approximation for
 // a first pass, not exact for a highly curved patch.
 void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v,
-	simd_float3 *outPos, simd_float3 *outNormal, simd_float2 *outTexcoord )
+	simd_float3 *outPos, simd_float3 *outNormal, simd_float2 *outTexcoord, simd_float2 *outLightmapCoord )
 {
 	float bu[3] = { ( 1.0f - u ) * ( 1.0f - u ), 2.0f * u * ( 1.0f - u ), u * u };
 	float bv[3] = { ( 1.0f - v ) * ( 1.0f - v ), 2.0f * v * ( 1.0f - v ), v * v };
@@ -104,6 +147,7 @@ void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v,
 	simd_float3 pos = simd_make_float3( 0.0f, 0.0f, 0.0f );
 	simd_float3 normal = simd_make_float3( 0.0f, 0.0f, 0.0f );
 	simd_float2 texcoord = simd_make_float2( 0.0f, 0.0f );
+	simd_float2 lightmapCoord = simd_make_float2( 0.0f, 0.0f );
 	for ( int j = 0; j < 3; j++ )
 	{
 		for ( int i = 0; i < 3; i++ )
@@ -112,9 +156,11 @@ void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v,
 			const float *xyz = ctrl[j][i]->xyz;
 			const float *n = ctrl[j][i]->normal;
 			const float *st = ctrl[j][i]->st;
+			const float *lm = ctrl[j][i]->lightmap;
 			pos += weight * simd_make_float3( xyz[0], xyz[1], xyz[2] );
 			normal += weight * simd_make_float3( n[0], n[1], n[2] );
 			texcoord += weight * simd_make_float2( st[0], st[1] );
+			lightmapCoord += weight * simd_make_float2( lm[0], lm[1] );
 		}
 	}
 
@@ -122,6 +168,7 @@ void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v,
 	float normalLen = simd_length( normal );
 	*outNormal = ( normalLen > 0.0001f ) ? ( normal / normalLen ) : simd_make_float3( 0.0f, 0.0f, 1.0f );
 	*outTexcoord = texcoord;
+	*outLightmapCoord = lightmapCoord;
 }
 
 // Tessellates every 3x3 sub-patch of one MST_PATCH surface at a fixed
@@ -129,7 +176,8 @@ void RT_EvalBezierPatch3x3( const drawVert_t *ctrl[3][3], float u, float v,
 // texcoord arrays - same flat, non-indexed triangle list as planar
 // surfaces, so no new pipeline/buffer/draw-call plumbing is needed.
 void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
-	std::vector<simd_float3> *outVerts, std::vector<simd_float3> *outNormals, std::vector<simd_float2> *outTexcoords )
+	std::vector<simd_float3> *outVerts, std::vector<simd_float3> *outNormals, std::vector<simd_float2> *outTexcoords,
+	std::vector<simd_float2> *outLightmapTexcoords )
 {
 	int width = surf->patchWidth;
 	int height = surf->patchHeight;
@@ -152,6 +200,7 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 	simd_float3 gridPos[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
 	simd_float3 gridNorm[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
 	simd_float2 gridTex[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
+	simd_float2 gridLightmap[RT_PATCH_TESSELLATION + 1][RT_PATCH_TESSELLATION + 1];
 
 	for ( int py = 0; py < numPatchesY; py++ )
 	{
@@ -168,7 +217,7 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 				for ( int gu = 0; gu <= RT_PATCH_TESSELLATION; gu++ )
 				{
 					float u = (float)gu / (float)RT_PATCH_TESSELLATION;
-					RT_EvalBezierPatch3x3( ctrl, u, v, &gridPos[gv][gu], &gridNorm[gv][gu], &gridTex[gv][gu] );
+					RT_EvalBezierPatch3x3( ctrl, u, v, &gridPos[gv][gu], &gridNorm[gv][gu], &gridTex[gv][gu], &gridLightmap[gv][gu] );
 				}
 			}
 
@@ -185,6 +234,9 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 					outTexcoords->push_back( gridTex[gv][gu] );
 					outTexcoords->push_back( gridTex[gv][gu + 1] );
 					outTexcoords->push_back( gridTex[gv + 1][gu + 1] );
+					outLightmapTexcoords->push_back( gridLightmap[gv][gu] );
+					outLightmapTexcoords->push_back( gridLightmap[gv][gu + 1] );
+					outLightmapTexcoords->push_back( gridLightmap[gv + 1][gu + 1] );
 
 					outVerts->push_back( gridPos[gv][gu] );
 					outVerts->push_back( gridPos[gv + 1][gu + 1] );
@@ -195,6 +247,9 @@ void RT_TessellatePatchSurface( dsurface_t *surf, drawVert_t *allVerts,
 					outTexcoords->push_back( gridTex[gv][gu] );
 					outTexcoords->push_back( gridTex[gv + 1][gu + 1] );
 					outTexcoords->push_back( gridTex[gv + 1][gu] );
+					outLightmapTexcoords->push_back( gridLightmap[gv][gu] );
+					outLightmapTexcoords->push_back( gridLightmap[gv + 1][gu + 1] );
+					outLightmapTexcoords->push_back( gridLightmap[gv + 1][gu] );
 				}
 			}
 		}
@@ -333,7 +388,321 @@ void RT_TessellateTerrainPatch( const cTerraPatch_t *patch,
 	}
 }
 
+// Session 22: real skybox rendering for shaders that use `skyParms
+// <basePath> <cloudHeight> <box>` instead of a map/clampmap stage
+// (textures/sky/mohday2 -> skyParms env/mohday2 512 -). The real
+// renderer (tr_sky.c) warps a curved sky dome generated from the sky
+// surface's own BSP geometry; this renders a fixed-size cube around the
+// camera instead (rotation-only view matrix, so it's always centered on
+// the player - the camera's position never reaches its faces) sampling
+// a real MTLTextureTypeCube built from the shader's 6 face images
+// (env/mohday2_{ft,bk,lf,rt,up,dn} - standard idtech3 skybox naming,
+// real JPGs already loadable since session 15). Simpler than the real
+// dome, and loses the sky surface's own silhouette (a skybox always
+// fills 100% of the screen the surface's hole would have shown it
+// through) - acceptable for a first pass; matches the same
+// real-geometry/simplified-technique tradeoff as MST_PATCH and terrain
+// above.
+id<MTLTexture> rtSkyCubeTexture = nil;
+id<MTLRenderPipelineState> rtSkyPipeline = nil;
+id<MTLDepthStencilState> rtSkyDepthState = nil;
+id<MTLSamplerState> rtSkySampler = nil;
+id<MTLBuffer> rtSkyVertexBuffer = nil;
+bool rtHasSky = false;
+
+const char *rtShaderSourceSky =
+	"#include <metal_stdlib>\n"
+	"using namespace metal;\n"
+	"struct VertexOutSky { float4 position [[position]]; float3 direction; };\n"
+	"vertex VertexOutSky rt_vertex_sky(uint vertexID [[vertex_id]],\n"
+	"    const device float3 *positions [[buffer(0)]],\n"
+	"    constant float4x4 &viewProj [[buffer(1)]]) {\n"
+	"    VertexOutSky out;\n"
+	"    float3 pos = positions[vertexID];\n"
+	"    out.position = viewProj * float4(pos, 1.0);\n"
+	"    out.direction = pos;\n"
+	"    return out;\n"
+	"}\n"
+	"fragment float4 rt_fragment_sky(VertexOutSky in [[stage_in]],\n"
+	"    texturecube<float> skyTex [[texture(0)]], sampler samp [[sampler(0)]]) {\n"
+	"    return skyTex.sample(samp, in.direction);\n"
+	"}\n";
+
+bool RT_EnsureSkyPipeline( void )
+{
+	if ( rtSkyPipeline != nil )
+		return true;
+
+	id<MTLDevice> device = RT_GetDevice();
+
+	NSError *error = nil;
+	id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:rtShaderSourceSky]
+	                                                options:nil
+	                                                  error:&error];
+	if ( library == nil )
+	{
+		ri.Printf( PRINT_ERROR, "renderer_metalrt: failed to compile sky shader: %s\n",
+			error ? [[error localizedDescription] UTF8String] : "unknown error" );
+		return false;
+	}
+
+	MTLRenderPipelineDescriptor *desc = [[MTLRenderPipelineDescriptor alloc] init];
+	desc.vertexFunction = [library newFunctionWithName:@"rt_vertex_sky"];
+	desc.fragmentFunction = [library newFunctionWithName:@"rt_fragment_sky"];
+	desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+	desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+
+	rtSkyPipeline = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+	if ( rtSkyPipeline == nil )
+	{
+		ri.Printf( PRINT_ERROR, "renderer_metalrt: failed to create sky pipeline: %s\n",
+			error ? [[error localizedDescription] UTF8String] : "unknown error" );
+		return false;
+	}
+
+	// Drawn first, behind everything - never tested against (nothing
+	// could occlude it yet) and never written (so every real opaque
+	// surface, however close, correctly draws over it via ITS OWN
+	// normal depth test against the still-cleared-to-far depth buffer).
+	MTLDepthStencilDescriptor *depthDesc = [[MTLDepthStencilDescriptor alloc] init];
+	depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
+	depthDesc.depthWriteEnabled = NO;
+	rtSkyDepthState = [device newDepthStencilStateWithDescriptor:depthDesc];
+
+	MTLSamplerDescriptor *samplerDesc = [[MTLSamplerDescriptor alloc] init];
+	samplerDesc.minFilter = MTLSamplerMinMagFilterLinear;
+	samplerDesc.magFilter = MTLSamplerMinMagFilterLinear;
+	samplerDesc.sAddressMode = MTLSamplerAddressModeClampToEdge;
+	samplerDesc.tAddressMode = MTLSamplerAddressModeClampToEdge;
+	rtSkySampler = [device newSamplerStateWithDescriptor:samplerDesc];
+
+	// A cube centered on the origin, comfortably inside [nearZ, farZ]
+	// (RT_RenderScene uses 4/8192) regardless of camera position, since
+	// the view matrix used to draw it has its translation stripped -
+	// only its rotation ever applies, so these LOCAL coordinates are
+	// also directly the sample direction (see the vertex shader above).
+	const float s = 100.0f;
+	static const simd_float3 skyVerts[36] = {
+		// +X (forward - engine axis convention, RT_BuildViewMatrix)
+		{ s, -s, -s }, { s, s, -s }, { s, s, s }, { s, -s, -s }, { s, s, s }, { s, -s, s },
+		// -X
+		{ -s, s, -s }, { -s, -s, -s }, { -s, -s, s }, { -s, s, -s }, { -s, -s, s }, { -s, s, s },
+		// +Y (left)
+		{ s, s, -s }, { -s, s, -s }, { -s, s, s }, { s, s, -s }, { -s, s, s }, { s, s, s },
+		// -Y (right)
+		{ -s, -s, -s }, { s, -s, -s }, { s, -s, s }, { -s, -s, -s }, { s, -s, s }, { -s, -s, s },
+		// +Z (up)
+		{ -s, -s, s }, { s, -s, s }, { s, s, s }, { -s, -s, s }, { s, s, s }, { -s, s, s },
+		// -Z (down)
+		{ -s, s, -s }, { s, s, -s }, { s, -s, -s }, { -s, s, -s }, { s, -s, -s }, { -s, -s, -s },
+	};
+	rtSkyVertexBuffer = [device newBufferWithBytes:skyVerts length:sizeof( skyVerts ) options:MTLResourceStorageModeShared];
+
+	return true;
+}
+
+// Loads the shader's 6 face images into one real MTLTextureTypeCube.
+// Metal's fixed cube-slice order is +X,-X,+Y,-Y,+Z,-Z, in WORLD space -
+// the sky cube's LOCAL coordinates above are literally world-axis-
+// aligned (no extra rotation) and get sampled with the direction
+// unchanged (RT_DrawSky only ever rotates them by the camera's current
+// orientation, never remaps which axis means what), so this is really
+// asking "which face image goes with world +X/-X/+Y/-Y/+Z/-Z" - a
+// WORLD-space question, unrelated to which way the camera happens to
+// be facing (a first attempt at this table wrongly reasoned from
+// RT_BuildViewMatrix's "forward=X" comment, which describes the
+// CAMERA's per-frame view axes, not a fixed world direction - there is
+// no such thing as a fixed "world forward" in a free-look game, so that
+// reasoning didn't even apply). Fixed by reading the real answer
+// straight out of the reference engine instead of re-deriving it:
+// tr_shader.c's ParseSkyParms loads suf[6]={"rt","bk","lf","ft","up","dn"}
+// into shader.sky.outerbox[0..5], and tr_sky.c's MakeSkyVec's
+// st_to_vec[axis] table (cross-referenced through sky_texorder) gives,
+// for each world-space axis, which outerbox[] index (thus which face
+// name) DrawSkySide binds there: +X=outerbox[0]="rt", -X=outerbox[2]="lf",
+// +Y=outerbox[1]="bk", -Y=outerbox[3]="ft", +Z=outerbox[4]="up",
+// -Z=outerbox[5]="dn" - both renderers load the same .bsp, so world
+// axes mean the same thing in both and this table is directly portable,
+// not just a guess to verify by eye. A live A/B against the user's own
+// report that the original renderer's sky has no visible seams (this
+// renderer's first attempt did) is what caught the original table being
+// wrong in the first place.
+// A real, common asset choice this renderer has to tolerate: the "down"
+// face of a skybox is often authored much smaller than the other five
+// (players rarely look straight down at it) - env/mohday2_dn is 16x16
+// against the other faces' 512x512. Metal requires every face of one
+// MTLTextureTypeCube to be identical size, so a mismatched face is
+// upscaled (nearest-neighbor - blurrier than the real content deserves,
+// but simple, and this face is barely seen) to the size of the first
+// face loaded, rather than rejecting the whole sky over one small face.
+byte *RT_ResizeRGBANearest( const byte *src, int srcW, int srcH, int dstW, int dstH )
+{
+	byte *dst = (byte *)ri.Malloc( dstW * dstH * 4 );
+	for ( int y = 0; y < dstH; y++ )
+	{
+		int sy = ( y * srcH ) / dstH;
+		if ( sy >= srcH )
+			sy = srcH - 1;
+		for ( int x = 0; x < dstW; x++ )
+		{
+			int sx = ( x * srcW ) / dstW;
+			if ( sx >= srcW )
+				sx = srcW - 1;
+			Com_Memcpy( dst + ( y * dstW + x ) * 4, src + ( sy * srcW + sx ) * 4, 4 );
+		}
+	}
+	return dst;
+}
+
+bool RT_LoadSkyCubemap( const char *basePath )
+{
+	struct SkyFaceSpec {
+		int slice;
+		const char *suffix;
+	};
+	static const SkyFaceSpec skyFaces[6] = {
+		{ 0, "rt" }, { 1, "lf" }, { 2, "bk" }, { 3, "ft" }, { 4, "up" }, { 5, "dn" },
+	};
+
+	byte *facePixels[6] = { NULL, NULL, NULL, NULL, NULL, NULL };
+	int faceWidth = 0, faceHeight = 0;
+	bool ok = true;
+
+	for ( int i = 0; i < 6 && ok; i++ )
+	{
+		char facePath[MAX_QPATH];
+		Com_sprintf( facePath, sizeof( facePath ), "%s_%s", basePath, skyFaces[i].suffix );
+
+		int w = 0, h = 0;
+		byte *pixels = RT_LoadImageFile( facePath, &w, &h );
+		if ( pixels == NULL )
+		{
+			ri.Printf( PRINT_WARNING, "renderer_metalrt: sky: couldn't load face \"%s\"\n", facePath );
+			ok = false;
+			break;
+		}
+
+		if ( i == 0 )
+		{
+			faceWidth = w;
+			faceHeight = h;
+		}
+		else if ( w != faceWidth || h != faceHeight )
+		{
+			ri.Printf( PRINT_WARNING, "renderer_metalrt: sky: face \"%s\" is %dx%d, resizing to match "
+				"the first face's %dx%d\n", facePath, w, h, faceWidth, faceHeight );
+			byte *resized = RT_ResizeRGBANearest( pixels, w, h, faceWidth, faceHeight );
+			ri.Free( pixels );
+			pixels = resized;
+		}
+
+		facePixels[skyFaces[i].slice] = pixels;
+	}
+
+	if ( !ok )
+	{
+		for ( int i = 0; i < 6; i++ )
+			if ( facePixels[i] != NULL )
+				ri.Free( facePixels[i] );
+		return false;
+	}
+
+	MTLTextureDescriptor *desc = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+	                                                                                    size:faceWidth
+	                                                                               mipmapped:NO];
+	desc.usage = MTLTextureUsageShaderRead;
+	rtSkyCubeTexture = [RT_GetDevice() newTextureWithDescriptor:desc];
+
+	MTLRegion region = MTLRegionMake2D( 0, 0, faceWidth, faceHeight );
+	for ( int slice = 0; slice < 6; slice++ )
+	{
+		[rtSkyCubeTexture replaceRegion:region
+		                     mipmapLevel:0
+		                           slice:slice
+	                           withBytes:facePixels[slice]
+	                         bytesPerRow:faceWidth * 4
+	                       bytesPerImage:faceWidth * faceHeight * 4];
+		ri.Free( facePixels[slice] );
+	}
+
+	return true;
+}
+
+// Session 24: the ray-traced pass shades every hit by real geometric
+// normal + a real traced shadow ray (see rt_raytrace.mm) - it computes
+// its own lighting from the actual scene, so it never needs the
+// lightmap approximation the rasterized path relies on. It does still
+// need a base albedo color per surface, though, and doesn't yet have
+// real per-pixel texture sampling (no bindless texture array wired up
+// this session) - so this samples a small grid of a group's already-
+// resolved diffuse texture and averages it into one representative
+// color, real material color (grass reads green, wood reads brown, sky
+// reads whatever the clear color is) instead of one uniform flat gray
+// for every surface. Coarser than real texturing, but a meaningfully
+// fairer comparison than no color information at all - a real, if
+// low-resolution, fact about each surface, not a placeholder.
+simd_float3 RT_GetAverageTextureColor( id<MTLTexture> texture )
+{
+	if ( texture == nil )
+		return simd_make_float3( 0.6f, 0.6f, 0.6f ); // matches RT_DrawWorld's flat-fallback gray
+
+	const int sampleGrid = 8;
+	int width = (int)texture.width;
+	int height = (int)texture.height;
+	if ( width <= 0 || height <= 0 )
+		return simd_make_float3( 0.6f, 0.6f, 0.6f );
+
+	long sumR = 0, sumG = 0, sumB = 0;
+	int numSamples = 0;
+	byte pixel[4];
+	for ( int gy = 0; gy < sampleGrid; gy++ )
+	{
+		int y = ( gy * height ) / sampleGrid;
+		for ( int gx = 0; gx < sampleGrid; gx++ )
+		{
+			int x = ( gx * width ) / sampleGrid;
+			MTLRegion region = MTLRegionMake2D( x, y, 1, 1 );
+			[texture getBytes:pixel bytesPerRow:4 fromRegion:region mipmapLevel:0];
+			sumR += pixel[0];
+			sumG += pixel[1];
+			sumB += pixel[2];
+			numSamples++;
+		}
+	}
+
+	return simd_make_float3( (float)sumR / ( numSamples * 255.0f ),
+		(float)sumG / ( numSamples * 255.0f ),
+		(float)sumB / ( numSamples * 255.0f ) );
+}
+
 } // namespace
+
+void RT_DrawSky( simd_float4x4 view, simd_float4x4 proj )
+{
+	if ( !rtHasSky || rtSkyCubeTexture == nil )
+		return;
+	if ( !RT_EnsureSkyPipeline() )
+		return;
+
+	id<MTLRenderCommandEncoder> encoder = RT_GetCurrentEncoder();
+	if ( encoder == nil )
+		return;
+
+	// Strip translation - the sky must always appear centered on the
+	// camera regardless of where in the map it's standing, only ever
+	// rotating with the view.
+	simd_float4x4 viewNoTranslation = view;
+	viewNoTranslation.columns[3] = simd_make_float4( 0.0f, 0.0f, 0.0f, 1.0f );
+	simd_float4x4 skyViewProj = simd_mul( proj, viewNoTranslation );
+
+	[encoder setRenderPipelineState:rtSkyPipeline];
+	[encoder setDepthStencilState:rtSkyDepthState];
+	[encoder setVertexBuffer:rtSkyVertexBuffer offset:0 atIndex:0];
+	[encoder setVertexBytes:&skyViewProj length:sizeof( skyViewProj ) atIndex:1];
+	[encoder setFragmentTexture:rtSkyCubeTexture atIndex:0];
+	[encoder setFragmentSamplerState:rtSkySampler atIndex:0];
+	[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:36];
+}
 
 static void RT_LoadWorld( const char *name )
 {
@@ -359,10 +728,12 @@ static void RT_LoadWorld( const char *name )
 	lump_t *vertsLump = Q_GetLumpByVersion( header, LUMP_DRAWVERTS );
 	lump_t *indexLump = Q_GetLumpByVersion( header, LUMP_DRAWINDEXES );
 	lump_t *terrainLump = Q_GetLumpByVersion( header, LUMP_TERRAIN );
+	lump_t *lightmapsLump = Q_GetLumpByVersion( header, LUMP_LIGHTMAPS );
 
 	if ( shadersLump->filelen % sizeof( dshader_t ) || surfsLump->filelen % sizeof( dsurface_t )
 		|| vertsLump->filelen % sizeof( drawVert_t ) || indexLump->filelen % sizeof( int )
-		|| terrainLump->filelen % sizeof( cTerraPatch_t ) )
+		|| terrainLump->filelen % sizeof( cTerraPatch_t )
+		|| lightmapsLump->filelen % ( RT_LIGHTMAP_SIZE * RT_LIGHTMAP_SIZE * 3 ) )
 	{
 		ri.Printf( PRINT_ERROR, "renderer_metalrt: LoadWorld: \"%s\" has malformed lump sizes\n", name );
 		ri.FS_FreeFile( fileData );
@@ -377,6 +748,41 @@ static void RT_LoadWorld( const char *name )
 	int *allIndexes = (int *)( fileData + indexLump->fileofs );
 	int numTerrainPatches = terrainLump->filelen / sizeof( cTerraPatch_t );
 	cTerraPatch_t *terrainPatches = (cTerraPatch_t *)( fileData + terrainLump->fileofs );
+	int numLightmapTiles = lightmapsLump->filelen / ( RT_LIGHTMAP_SIZE * RT_LIGHTMAP_SIZE * 3 );
+	byte *lightmapData = fileData + lightmapsLump->fileofs;
+
+	// Session 23: real per-surface lightmaps. LUMP_LIGHTMAPS is a raw,
+	// headerless array of RT_LIGHTMAP_SIZE^2*3 (RGB, no alpha) tiles -
+	// one real Metal texture per tile, converted to RGBA (Metal has no
+	// 3-channel format worth the complexity of a second code path for
+	// just this). Every dsurface_t/cTerraPatch_t's lightmapNum/iLightMap
+	// is simply an index into this array (LIGHTMAP_NONE = -1 means "no
+	// lightmap" - a real, valid case, not a bug, e.g. sky). Freed and
+	// rebuilt every LoadWorld like everything else here - not kept
+	// across map loads.
+	for ( int i = 0; i < numRtLightmapTextures; i++ )
+		rtLightmapTextures[i] = nil;
+	numRtLightmapTextures = 0;
+	for ( int i = 0; i < numLightmapTiles && i < MAX_RT_LIGHTMAPS; i++ )
+	{
+		byte *rgb = lightmapData + i * RT_LIGHTMAP_SIZE * RT_LIGHTMAP_SIZE * 3;
+		static byte rgba[RT_LIGHTMAP_SIZE * RT_LIGHTMAP_SIZE * 4];
+		for ( int p = 0; p < RT_LIGHTMAP_SIZE * RT_LIGHTMAP_SIZE; p++ )
+		{
+			rgba[p * 4 + 0] = rgb[p * 3 + 0];
+			rgba[p * 4 + 1] = rgb[p * 3 + 1];
+			rgba[p * 4 + 2] = rgb[p * 3 + 2];
+			rgba[p * 4 + 3] = 255;
+		}
+		rtLightmapTextures[i] = RT_CreateTexture( rgba, RT_LIGHTMAP_SIZE, RT_LIGHTMAP_SIZE );
+		numRtLightmapTextures++;
+	}
+	if ( numLightmapTiles > MAX_RT_LIGHTMAPS )
+	{
+		ri.Printf( PRINT_WARNING, "renderer_metalrt: LoadWorld: \"%s\" has %d lightmap tiles, "
+			"MAX_RT_LIGHTMAPS (%d) hit - surfaces past that index draw unlit\n",
+			name, numLightmapTiles, MAX_RT_LIGHTMAPS );
+	}
 
 	// Counting pass purely for the summary log line below - doesn't
 	// affect how the vectors are built (session 14 groups by shader
@@ -425,69 +831,66 @@ static void RT_LoadWorld( const char *name )
 	std::vector<simd_float3> worldVerts;
 	std::vector<simd_float3> worldNormals;
 	std::vector<simd_float2> worldTexcoords;
+	std::vector<simd_float2> worldLightmapTexcoords;
 
 	numRtWorldGroups = 0;
 	int numTexturedGroups = 0;
+	int numLightmappedGroups = 0;
+
+	// Reset per-map, not left over from whatever the previous LoadWorld
+	// (a different map, or a vid_restart of this one) set - a map with
+	// no sky shader at all must not keep rendering the last one's.
+	rtHasSky = false;
+	rtSkyCubeTexture = nil;
+
+	// Adds a group spanning [groupStart, current end) if it's non-empty,
+	// resolving lightmapNum to a real texture (nil if none/out of
+	// range). Shared by the terrain sub-group and every (shaderIdx,
+	// lightmapNum) sub-group below - factored out once restructuring for
+	// per-lightmap sub-grouping made "add a group" a multi-line, easy-
+	// to-typo-twice operation instead of the single assignment it used
+	// to be.
+	auto addGroup = [&]( int groupStart, id<MTLTexture> texture, rtBlendMode_t blendMode, int lightmapNum )
+	{
+		int groupCount = (int)worldVerts.size() - groupStart;
+		if ( groupCount == 0 )
+			return;
+
+		id<MTLTexture> lightmapTexture = nil;
+		if ( lightmapNum >= 0 && lightmapNum < numRtLightmapTextures )
+		{
+			lightmapTexture = rtLightmapTextures[lightmapNum];
+			numLightmappedGroups++;
+		}
+
+		if ( numRtWorldGroups < MAX_RT_WORLD_GROUPS )
+		{
+			rtWorldGroup_t *group = &rtWorldGroups[numRtWorldGroups++];
+			group->texture = texture;
+			group->lightmapTexture = lightmapTexture;
+			group->blendMode = blendMode;
+			group->vertexStart = groupStart;
+			group->vertexCount = groupCount;
+		}
+		else
+		{
+			ri.Printf( PRINT_WARNING, "renderer_metalrt: LoadWorld: \"%s\" hit MAX_RT_WORLD_GROUPS (%d), "
+				"dropping a group's geometry\n", name, MAX_RT_WORLD_GROUPS );
+		}
+	};
 
 	for ( int shaderIdx = 0; shaderIdx < numShaders; shaderIdx++ )
 	{
-		int groupStart = (int)worldVerts.size();
-
-		for ( int i = 0; i < numSurfaces; i++ )
-		{
-			dsurface_t *surf = &surfaces[i];
-			if ( surf->shaderNum != shaderIdx )
-				continue;
-
-			if ( surf->surfaceType == MST_PLANAR )
-			{
-				drawVert_t *surfVerts = allVerts + surf->firstVert;
-				int *surfIndexes = allIndexes + surf->firstIndex;
-
-				for ( int j = 0; j < surf->numIndexes; j++ )
-				{
-					int vertIndex = surfIndexes[j];
-					if ( vertIndex < 0 || vertIndex >= surf->numVerts )
-						continue; // malformed index - skip rather than read out of bounds
-
-					const float *xyz = surfVerts[vertIndex].xyz;
-					const float *normal = surfVerts[vertIndex].normal;
-					const float *st = surfVerts[vertIndex].st;
-					worldVerts.push_back( simd_make_float3( xyz[0], xyz[1], xyz[2] ) );
-					worldNormals.push_back( simd_make_float3( normal[0], normal[1], normal[2] ) );
-					worldTexcoords.push_back( simd_make_float2( st[0], st[1] ) );
-				}
-			}
-			else if ( surf->surfaceType == MST_PATCH )
-			{
-				RT_TessellatePatchSurface( surf, allVerts, &worldVerts, &worldNormals, &worldTexcoords );
-			}
-		}
-
-		// Session 21: terrain patches are keyed by their own iShader
-		// field into this SAME shader lump - not a dsurface_t, so they
-		// don't appear in the surfaces[] loop above, but they group into
-		// this shaderIdx's contiguous vertex range exactly the same way.
-		for ( int t = 0; t < numTerrainPatches; t++ )
-		{
-			if ( terrainPatches[t].iShader != shaderIdx )
-				continue;
-			RT_TessellateTerrainPatch( &terrainPatches[t], &worldVerts, &worldNormals, &worldTexcoords );
-		}
-
-		int groupCount = (int)worldVerts.size() - groupStart;
-		if ( groupCount == 0 )
-			continue; // no planar/patch surface in the map actually uses this shader
-
 		// Real .shader-script/direct-image resolution, exactly like
 		// rt_scene.mm's TIKI surface texturing (session 7-8) - most
 		// world shaders are more complex than a single map/clampmap
-		// stage (sky, fog, lightmap-blended multi-stage surfaces), so
-		// a nil result here is expected for many, not a bug; those
-		// groups draw through the flat-gray fallback pipeline instead,
-		// same as every world surface did before this session.
+		// stage (fog, procedural stages), so a nil result here is
+		// expected for some, not a bug; those groups draw through the
+		// flat-gray fallback pipeline instead, same as every world
+		// surface did before session 14.
 		id<MTLTexture> texture = nil;
 		rtBlendMode_t blendMode = RT_BLEND_OPAQUE;
+		bool isSky = false;
 		if ( shaders[shaderIdx].shader[0] != '\0' )
 		{
 			qhandle_t handle = RT_RegisterImageCommon( shaders[shaderIdx].shader );
@@ -497,20 +900,128 @@ static void RT_LoadWorld( const char *name )
 				blendMode = RT_GetImageBlendMode( handle );
 				numTexturedGroups++;
 			}
+			else
+			{
+				// Session 22: a sky shader never resolves via
+				// RT_RegisterImageCommon above (it has no map/clampmap
+				// stage) - check separately whether that's WHY it failed.
+				// One skybox per map (the common case, matching the real
+				// renderer's own "current sky" concept) - first one found
+				// wins; a map with more than one sky shader in actual use
+				// is a real, separate gap, not something silently wrong
+				// here.
+				char skyBasePath[MAX_QPATH];
+				if ( !rtHasSky && RT_FindShaderSkyParms( shaders[shaderIdx].shader, skyBasePath, sizeof( skyBasePath ) ) )
+				{
+					rtHasSky = RT_LoadSkyCubemap( skyBasePath );
+					if ( rtHasSky )
+						isSky = true;
+				}
+			}
 		}
 
-		if ( numRtWorldGroups < MAX_RT_WORLD_GROUPS )
+		if ( isSky )
 		{
-			rtWorldGroup_t *group = &rtWorldGroups[numRtWorldGroups++];
-			group->texture = texture;
-			group->blendMode = blendMode;
-			group->vertexStart = groupStart;
-			group->vertexCount = groupCount;
+			// The skybox render (RT_DrawSky) replaces this shader's
+			// surfaces entirely - it fills the whole view, not just this
+			// specific surface's own silhouette, so its real BSP geometry
+			// would only ever draw over/under the skybox for no visible
+			// benefit. No geometry has been gathered yet at this point
+			// (moved the texture/sky resolution before gathering,
+			// session 23), so there's nothing to roll back.
+			continue;
 		}
-		else
+
+		// Terrain patches are keyed by their own iShader field into this
+		// SAME shader lump (session 21) - not a dsurface_t, so they
+		// don't appear in the surfaces[] scan below. Grouped separately
+		// from the (shaderIdx, lightmapNum) sub-groups below: terrain's
+		// own lightmap UV convention (cTerraPatch_t::lmapStep/lmapSize,
+		// tr_terrain.c) is a different, more involved system than
+		// drawVert_t's simple per-vertex lightmap UV - real, separate
+		// work, so terrain keeps the existing flat-directional-light
+		// path unchanged (lightmapNum always -1 here) rather than
+		// pushing wrong/meaningless lightmap texcoords.
 		{
-			ri.Printf( PRINT_WARNING, "renderer_metalrt: LoadWorld: \"%s\" hit MAX_RT_WORLD_GROUPS (%d), "
-				"dropping shader \"%s\"'s geometry\n", name, MAX_RT_WORLD_GROUPS, shaders[shaderIdx].shader );
+			int terrainGroupStart = (int)worldVerts.size();
+			for ( int t = 0; t < numTerrainPatches; t++ )
+			{
+				if ( terrainPatches[t].iShader != shaderIdx )
+					continue;
+				RT_TessellateTerrainPatch( &terrainPatches[t], &worldVerts, &worldNormals, &worldTexcoords );
+				worldLightmapTexcoords.resize( worldVerts.size(), simd_make_float2( 0.0f, 0.0f ) );
+			}
+			addGroup( terrainGroupStart, texture, blendMode, -1 );
+		}
+
+		// Session 23: regular surfaces sub-grouped by lightmapNum, not
+		// just shaderIdx - two surfaces can share a diffuse shader but
+		// use different baked lightmap tiles (very common: each maps to
+		// wherever the level compiler happened to pack its lightmap),
+		// and each combination needs its own draw call to bind the
+		// right lightmap texture. Collecting the small set of DISTINCT
+		// lightmapNum values this shaderIdx's surfaces actually use
+		// first, rather than looping every possible lightmap index
+		// against every surface, keeps this to roughly one pass over
+		// numSurfaces per shader instead of one pass per (shader,
+		// lightmap) pair.
+		std::vector<int> lightmapNumsForShader;
+		for ( int i = 0; i < numSurfaces; i++ )
+		{
+			if ( surfaces[i].shaderNum != shaderIdx )
+				continue;
+			int lm = surfaces[i].lightmapNum;
+			bool seen = false;
+			for ( int existing : lightmapNumsForShader )
+			{
+				if ( existing == lm )
+				{
+					seen = true;
+					break;
+				}
+			}
+			if ( !seen )
+				lightmapNumsForShader.push_back( lm );
+		}
+
+		for ( int lightmapNum : lightmapNumsForShader )
+		{
+			int groupStart = (int)worldVerts.size();
+
+			for ( int i = 0; i < numSurfaces; i++ )
+			{
+				dsurface_t *surf = &surfaces[i];
+				if ( surf->shaderNum != shaderIdx || surf->lightmapNum != lightmapNum )
+					continue;
+
+				if ( surf->surfaceType == MST_PLANAR )
+				{
+					drawVert_t *surfVerts = allVerts + surf->firstVert;
+					int *surfIndexes = allIndexes + surf->firstIndex;
+
+					for ( int j = 0; j < surf->numIndexes; j++ )
+					{
+						int vertIndex = surfIndexes[j];
+						if ( vertIndex < 0 || vertIndex >= surf->numVerts )
+							continue; // malformed index - skip rather than read out of bounds
+
+						const float *xyz = surfVerts[vertIndex].xyz;
+						const float *normal = surfVerts[vertIndex].normal;
+						const float *st = surfVerts[vertIndex].st;
+						const float *lm = surfVerts[vertIndex].lightmap;
+						worldVerts.push_back( simd_make_float3( xyz[0], xyz[1], xyz[2] ) );
+						worldNormals.push_back( simd_make_float3( normal[0], normal[1], normal[2] ) );
+						worldTexcoords.push_back( simd_make_float2( st[0], st[1] ) );
+						worldLightmapTexcoords.push_back( simd_make_float2( lm[0], lm[1] ) );
+					}
+				}
+				else if ( surf->surfaceType == MST_PATCH )
+				{
+					RT_TessellatePatchSurface( surf, allVerts, &worldVerts, &worldNormals, &worldTexcoords, &worldLightmapTexcoords );
+				}
+			}
+
+			addGroup( groupStart, texture, blendMode, lightmapNum );
 		}
 	}
 
@@ -532,10 +1043,83 @@ static void RT_LoadWorld( const char *name )
 	rtWorldTexcoordBuffer = [RT_GetDevice() newBufferWithBytes:worldTexcoords.data()
 	                                                     length:worldTexcoords.size() * sizeof( simd_float2 )
 	                                                    options:MTLResourceStorageModeShared];
+	rtWorldLightmapTexcoordBuffer = [RT_GetDevice() newBufferWithBytes:worldLightmapTexcoords.data()
+	                                                             length:worldLightmapTexcoords.size() * sizeof( simd_float2 )
+	                                                            options:MTLResourceStorageModeShared];
 
+	// Session 24: one real average-albedo color per TRIANGLE (not per
+	// vertex - the ray tracer indexes this by primitive_id), filled from
+	// each group's own already-resolved texture. A cache keyed by
+	// texture pointer avoids re-reading the same texture's pixels for
+	// every group that happens to share it (e.g. the same wood texture
+	// used across many separate surfaces).
+	{
+		int numTriangles = rtWorldVertexCount / 3;
+		std::vector<simd_float3> triangleColors( numTriangles, simd_make_float3( 0.6f, 0.6f, 0.6f ) );
+		std::vector<id<MTLTexture>> seenTextures;
+		std::vector<simd_float3> seenColors;
+		for ( int g = 0; g < numRtWorldGroups; g++ )
+		{
+			rtWorldGroup_t *group = &rtWorldGroups[g];
+			simd_float3 color;
+			bool found = false;
+			for ( size_t s = 0; s < seenTextures.size(); s++ )
+			{
+				if ( seenTextures[s] == group->texture )
+				{
+					color = seenColors[s];
+					found = true;
+					break;
+				}
+			}
+			if ( !found )
+			{
+				color = RT_GetAverageTextureColor( group->texture );
+				seenTextures.push_back( group->texture );
+				seenColors.push_back( color );
+			}
+
+			int firstTri = group->vertexStart / 3;
+			int lastTri = ( group->vertexStart + group->vertexCount ) / 3;
+			for ( int t = firstTri; t < lastTri && t < numTriangles; t++ )
+				triangleColors[t] = color;
+		}
+
+		rtWorldTriangleColorBuffer = [RT_GetDevice() newBufferWithBytes:triangleColors.data()
+		                                                          length:triangleColors.size() * sizeof( simd_float3 )
+		                                                         options:MTLResourceStorageModeShared];
+	}
+
+	// Session 23 note: numTexturedGroups/numShaders counts DISTINCT
+	// SHADERS that resolved a texture (unchanged meaning since session
+	// 14); numRtWorldGroups is now draw-call groups after per-lightmap
+	// sub-grouping, a bigger and unrelated number - reported separately
+	// so the two don't get compared against each other misleadingly.
 	ri.Printf( PRINT_ALL, "renderer_metalrt: LoadWorld: \"%s\": %d planar, %d patch surfaces, %d terrain patches, "
-		"%d verts, %d/%d shader groups textured\n",
-		name, numPlanarSurfaces, numPatchSurfaces, numTerrainPatches, rtWorldVertexCount, numTexturedGroups, numRtWorldGroups );
+		"%d verts, %d/%d shaders resolved, %d draw groups (%d lightmapped), %d lightmap tiles\n",
+		name, numPlanarSurfaces, numPatchSurfaces, numTerrainPatches, rtWorldVertexCount, numTexturedGroups, numShaders,
+		numRtWorldGroups, numLightmappedGroups, numRtLightmapTextures );
+
+	// Session 24: real ray tracing, built from the exact same non-indexed
+	// world triangle soup rasterization has used since session 4 - the
+	// geometry extraction work was never the part that needed replacing,
+	// only the lighting model on top of it.
+	RT_BuildWorldAccelStructure();
+}
+
+id<MTLBuffer> RT_GetWorldVertexBuffer( void )
+{
+	return rtWorldVertexBuffer;
+}
+
+int RT_GetWorldVertexCount( void )
+{
+	return rtWorldVertexCount;
+}
+
+id<MTLBuffer> RT_GetWorldTriangleColorBuffer( void )
+{
+	return rtWorldTriangleColorBuffer;
 }
 
 void RT_DrawWorld( simd_float4x4 viewProj )
@@ -570,12 +1154,23 @@ void RT_DrawWorld( simd_float4x4 viewProj )
 	// buffers via each group's own [vertexStart, vertexStart+vertexCount)
 	// range (there's no index buffer to slice instead).
 	bool haveTexturedPipeline = RT_EnsurePipelineTextured3D();
+	bool haveLightmapPipeline = RT_EnsurePipelineLightmap3D();
 
 	for ( int i = 0; i < numRtWorldGroups; i++ )
 	{
 		rtWorldGroup_t *group = &rtWorldGroups[i];
 
-		if ( group->texture != nil && haveTexturedPipeline )
+		if ( group->texture != nil && group->lightmapTexture != nil && haveLightmapPipeline )
+		{
+			// Session 23: a real lightmap replaces the flat directional
+			// light entirely for this group - it already encodes real,
+			// pre-baked shading (including self-occlusion a single
+			// global light direction can't represent) computed from the
+			// actual level geometry at compile time.
+			RT_DrawLightmappedGeometry( rtWorldVertexBuffer, rtWorldTexcoordBuffer, rtWorldLightmapTexcoordBuffer,
+				group->vertexStart, group->vertexCount, mvp, group->texture, group->lightmapTexture );
+		}
+		else if ( group->texture != nil && haveTexturedPipeline )
 		{
 			RT_DrawTexturedGeometry( rtWorldVertexBuffer, rtWorldTexcoordBuffer, rtWorldNormalBuffer,
 				group->vertexStart, group->vertexCount, mvp, identityNormalMatrix,

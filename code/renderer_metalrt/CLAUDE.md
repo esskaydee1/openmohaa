@@ -152,6 +152,124 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 2, session 24 shipped: real ray tracing - a genuine
+  pivot, not another rasterization-parity session. Prompted directly by
+  the user pointing out, mid-session, that continuing to deepen the
+  rasterized/lightmap-based rendering (sessions 20-23) was investing in
+  a lighting model the project's own actual goal (real dynamic lighting,
+  the "rt" in this renderer's name) would replace outright, not build
+  on - "why is there a choice being positioned... I thought we're
+  building toward that." That's a real critique, not just a preference:
+  every rasterization session before this one WAS reproducing 2002-era
+  GL1/GL2 technique, not moving toward this renderer's stated point.
+  Confirmed `MTLDevice.supportsRaytracing` (and `supportsRaytracingFromRender`)
+  on the M3 Ultra - real hardware RT acceleration, not software fallback.
+  New `rt_raytrace.mm`: builds a real `MTLAccelerationStructure` from
+  the exact same non-indexed world triangle buffer rasterization has
+  used since session 4 (the geometry-extraction work was never the part
+  that needed replacing - only the lighting model built on top of it
+  was), then a compute kernel (`#include <metal_raytracing>`,
+  `intersector<triangle_data>`) traces one primary ray plus one real
+  shadow ray per pixel directly against it, replacing RT_DrawSky+
+  RT_DrawWorld for the base scene (entities still rasterize on top,
+  unchanged, for now - not yet part of the acceleration structure).
+  Runs on its own command buffer (a compute encoder can't share
+  RE_BeginFrame's already-open render encoder), submitted to the same
+  queue before the main per-frame buffer so it completes first, output
+  composited via a full-screen textured quad in the real render pass.
+  Deliberately minimal, same "prove the pipeline before adding
+  sophistication" approach every other real feature here started with:
+  no per-pixel UV-sampled texturing yet (would need a bindless texture
+  array, not built this session) - instead, one real average-albedo
+  color per triangle, sampled from each shader group's already-resolved
+  diffuse texture (a small `getBytes` grid sample, cached per unique
+  texture), so surfaces at least show real, distinguishing material
+  color instead of one flat gray for everything. A live `r_metalrtRaytrace`
+  cvar (default 1) toggles back to the rasterized path - added
+  specifically to allow a same-build, same-vantage-point before/after,
+  not as a maintained long-term fallback. Verified: real geometric self-
+  shadowing, coherent with one consistent light direction (unlike the
+  lightmap-based lighting's "where is the light source" ambiguity
+  raised in session 23, this is directly, verifiably computed from
+  actual traced visibility, not baked/replayed data) - genuinely
+  something the rasterized path could not do without a separate shadow-
+  map system. FPS essentially unchanged from rasterization (~90-95),
+  confirming the M3 Ultra's hardware RT acceleration handles this scene
+  size without a performance penalty. Stable 2.5+ minutes, no crash,
+  both the ray-traced and rasterized paths verified working via the
+  toggle. Next: entities in the acceleration structure (needs an
+  instance acceleration structure with per-model transforms, not just
+  the single static-world primitive one built so far), real per-pixel
+  texture sampling (bindless texture array + barycentric UV
+  interpolation from the intersection result), soft/area shadows, then
+  real reflections and path-traced global illumination - the actual
+  long-term destination this session is a first, small step toward.
+
+- 2026-09-07: Phase 1, session 23 shipped: real per-surface lightmaps -
+  prompted by the user directly comparing this renderer's screenshots
+  against the original GL1/GL2 output and calling out that towers/wood
+  looked "2D and lifeless" even setting the sky/tree issues aside.
+  `drawVert_t::lightmap[2]` (a second, already-present set of texcoords
+  every world vertex carries) and `LUMP_LIGHTMAPS` (25 raw, headerless
+  128x128 RGB tiles on training.bsp, no packing/atlas - confirmed by
+  checking the reference engine's own `FatPackU`/`FatPackV` remap code,
+  which exists specifically to repack SEPARATE per-surface tiles into a
+  shared GPU atlas as a performance optimization this renderer doesn't
+  need, meaning the RAW per-vertex UV is directly correct here with no
+  extra transform) were sitting completely unused since session 4.
+  Loads each tile as its own real Metal texture (indexed directly by
+  `dsurface_t::lightmapNum`/`cTerraPatch_t::iLightMap`), restructured
+  `RT_LoadWorld`'s per-shader grouping to sub-group by (shaderIdx,
+  lightmapNum) pairs (two surfaces can share a diffuse shader but use
+  different baked tiles), and added a new lightmap-only pipeline
+  (diffuse x lightmap x overbright, no directional light term at all -
+  a real lightmap already IS the final baked shading, computed from the
+  actual scene at compile time; adding a dynamic light on top would
+  double-count). First attempt at the overbright scale (x2) still read
+  near-black almost everywhere - measured the actual raw tile data
+  directly (averages of ~20-65/255 across the 25 tiles - real, valid,
+  just genuinely dim) rather than assume a bug, and corrected to x4
+  (idtech3's real `r_mapOverBrightBits 2` default). Confirmed via the
+  reference engine's own `ParseSkyParms`-adjacent lightmap-loading code
+  that this renderer's direct raw-UV approach is mathematically
+  equivalent to the real engine's pre-atlas-packing value - the
+  lighting is real baked data, correctly sampled, not fabricated,
+  though tuning it exactly right (and separating "legitimately dark
+  source content" from "still-imperfect overbright") remained open at
+  session end. Real, visible improvement (a genuine light highlight on
+  the road, real color variation in the treeline) but not a full fix -
+  large ground areas stayed darker than expected. Superseded in
+  practice by session 24: the ray-traced path computes its own lighting
+  and doesn't use lightmaps at all, so this remains the lit path only
+  when `r_metalrtRaytrace 0` falls back to rasterization.
+
+- 2026-09-07: Phase 1, session 22 shipped: real sky rendering
+  (`skyParms`), the last of the three live bugs found once the user's
+  screen unlocked and they could compare this renderer directly against
+  the original ("sheet of paper wrapping the road" was session 21's
+  flat-gray-fallback sky surfaces, not a separate bug). Real
+  `MTLTextureTypeCube` built from the shader's 6 face JPGs (already
+  loadable since session 15), sampled by a rotation-only view matrix so
+  it always appears centered on the camera. First attempt's face-to-
+  axis table was wrong - reasoned from `RT_BuildViewMatrix`'s "forward=X"
+  comment, which describes the CAMERA's per-frame view axes, not a
+  fixed world direction (there is no "world forward" in a free-look
+  game, so that reasoning didn't even apply to a WORLD-space skybox).
+  Caught directly by the user reporting a visible seam the original
+  renderer doesn't have; fixed by reading the real answer out of the
+  reference engine instead of re-deriving it (`tr_shader.c`'s
+  `ParseSkyParms` face-suffix load order cross-referenced through
+  `tr_sky.c`'s `st_to_vec`/`sky_texorder` tables). A seam reportedly
+  remained even after that fix - root cause not found by session end.
+  Also handles a real asset quirk (env/mohday2_dn.jpg is 16x16 against
+  the other 5 faces' 512x512 - a real, common skybox authoring choice
+  since the down face is rarely seen closely - Metal requires all cube
+  faces to match size, so it's upscaled rather than rejecting the whole
+  sky over one small face). Sky-shader surfaces are excluded from the
+  normal per-shader-group flat-gray-fallback draw entirely once a real
+  skybox resolves for them (the skybox replaces their visual role, so
+  their own BSP geometry would only draw over/under it for no benefit).
+
 - 2026-09-07: Phase 1, sessions 20-21 shipped, both from a single live
   bug report once the user was back and looking at the screen directly:
   "trees look pasted on a 2D black wallpaper wrapping the road." Session

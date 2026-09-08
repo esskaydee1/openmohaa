@@ -191,6 +191,11 @@ id<MTLRenderCommandEncoder> RT_GetCurrentEncoder( void )
 	return rtCurrentEncoder;
 }
 
+id<MTLCommandQueue> RT_GetQueue( void )
+{
+	return rtQueue;
+}
+
 /*
 ===============
 RE_Shutdown
