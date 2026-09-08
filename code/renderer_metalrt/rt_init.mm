@@ -96,6 +96,13 @@ bool RT_InitWindowAndDevice( void )
 
 	rtLayer.device = rtDevice;
 	rtLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+	// Explicit, not just relying on CAMetalLayer's default: session 18's
+	// FPS-gap investigation confirmed nextDrawable's vsync blocking (via
+	// this) is the actual frame pacing mechanism, not GL's r_swapinterval
+	// equivalent - com_speeds profiling showed real render frontend/
+	// backend cost is ~0ms every frame, so this deliberately paces to
+	// the display, matching normal smooth-gameplay expectations.
+	rtLayer.displaySyncEnabled = YES;
 
 	int drawableW = 0, drawableH = 0;
 	SDL_Metal_GetDrawableSize( rtWindow, &drawableW, &drawableH );

@@ -152,6 +152,37 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 18 shipped: closed the long-open
+  "GL1 200fps vs metalrt 85-95fps" investigation - a diagnostic session,
+  no rendering-path fix needed or applied, no visual verification
+  required either (nothing changed on screen). `com_speeds 1`'s
+  per-frame timing breakdown (sv/ev/cl/gm/rf/bk buckets, all in ms) on
+  the training map showed `rf`+`bk` (render frontend/backend - CPU-side
+  Metal encode+submit) reading essentially 0ms on every single frame:
+  real Metal rendering was never the bottleneck. The old 85-95fps figure
+  is almost certainly just `com_maxfps` (qcommon/common.c, defaults to
+  85, a generic engine-wide frame limiter, not renderer-specific) -
+  confirmed directly: explicitly testing at `com_maxfps 85` gives an
+  ~11-12ms frame period (matches 1000/85 almost exactly), while
+  `com_maxfps 0` (uncapped) gives ~7-9ms (~110-140fps) with `rf`/`bk`
+  still flat 0ms either way. So the original GL1-vs-metalrt comparison
+  was very likely just two runs with different `com_maxfps` settings,
+  not a real Metal performance deficit - this is considered closed, not
+  an open item anymore. Along the way, found (via reading `nextDrawable`/
+  `presentDrawable` in `rt_init.mm`) that this renderer relied silently
+  on `CAMetalLayer.displaySyncEnabled`'s default (YES) for its vsync
+  pacing, never setting it explicitly the way `sdl_glimp.c` exposes
+  `r_swapinterval` for GL1/GL2 - made this one line explicit with a
+  comment explaining why, a zero-behavior-change hardening edit (`rt_init.mm`
+  near the layer setup). Verified: `LoadWorld` still 68/69 (session 17's
+  number, unchanged), stable 90+ seconds, no crash, no regression - both
+  the com_maxfps tests and the displaySyncEnabled change are purely
+  config/clarity, not new rendering code. Next: real skybox rendering
+  (`skyParms`, to close the last 1/69 - has real 6-face JPG assets ready
+  since session 15, needs visual verification once the screen unlocks),
+  real LOD-adaptive patch subdivision, real lightgrid-based lighting, or
+  TIKI animation/skinning - all still open.
+
 - 2026-09-07: Phase 1, session 17 shipped: a real bug fix found while
   scanning content for session 16's PNG impact, not a new format.
   `RT_LoadImageFile` (`rt_image.mm`), when given a name with an explicit
