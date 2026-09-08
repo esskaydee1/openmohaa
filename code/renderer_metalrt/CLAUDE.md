@@ -152,6 +152,30 @@ does. Freshly authored content that doesn't derive from original files
 ## Status log
 Append one line per session: date, what shipped, what's next. Newest on top.
 
+- 2026-09-07: Phase 1, session 17 shipped: a real bug fix found while
+  scanning content for session 16's PNG impact, not a new format.
+  `RT_LoadImageFile` (`rt_image.mm`), when given a name with an explicit
+  extension (e.g. `.tga`, exactly what a `.shader` script's `map` line
+  usually gives), only ever tried that one loader and returned
+  immediately even on failure - it never fell through to try other
+  extensions against the same base name, unlike the real engine's
+  `R_FindImageFile`. This mattered concretely: this era's assets
+  routinely have a `.shader` reference `foo.tga` when only `foo.jpg`
+  ever shipped (confirmed directly - `textures/interior/trenchwall2.tga`
+  is referenced by `textures/interior/woodbeamed_trenchwall2`'s shader,
+  but only `trenchwall2.jpg` exists in the pk3s). Fixed by falling
+  through to the existing extension-search loop whenever the
+  named-extension attempt returns NULL. Impact on the training map:
+  `LoadWorld`'s shader-group texturing jumped from session 15/16's
+  63/69 to **68/69** - every world shader but one now resolves. The
+  lone holdout, `textures/sky/mohday2`, uses `skyParms` with no
+  `map`/`clampmap` stage at all - a real skybox feature, correctly out
+  of scope for this parser, not a bug. Verified stable (90s+, no crash,
+  no regression). Next: real skybox rendering (`skyParms`) to close the
+  last 1/69, real LOD-adaptive patch subdivision, real lightgrid-based
+  lighting, TIKI animation/skinning, or the GL1-vs-metalrt FPS gap - all
+  still open.
+
 - 2026-09-07: Phase 1, session 16 shipped: real PNG image decoding.
   `tr_image_png.c` + `puff.c` (its inflate implementation) are, like
   TGA/BMP/PCX, pure in-tree C with no external library dependency -

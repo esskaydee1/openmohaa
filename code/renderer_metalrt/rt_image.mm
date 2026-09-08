@@ -366,9 +366,18 @@ byte *RT_LoadImageFile( const char *name, int *width, int *height )
 			if ( !Q_stricmp( ext, entry.ext ) )
 			{
 				entry.loader( localName, &pic, width, height );
-				return pic;
+				break;
 			}
 		}
+
+		if ( pic != NULL )
+			return pic;
+
+		// The named extension didn't exist on disk (or wasn't one of
+		// ours) - fall through to try every other extension against the
+		// same base name, matching the real engine's R_FindImageFile.
+		// Common in this era's assets: a .shader script says "map
+		// foo.tga" but only foo.jpg ever shipped.
 	}
 
 	char base[MAX_QPATH];
