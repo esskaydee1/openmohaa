@@ -21,10 +21,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 
 
-// bspfile.h has to come first - see the matching note in qbsp.h.
-#include "bspfile.h"
 #include "cmdlib.h"
 #include "mathlib.h"
+#include "bspfile.h"
 #include "imagelib.h"
 #include "threads.h"
 #include "mutex.h"
@@ -386,7 +385,7 @@ void DebugNet_DrawMesh(mesh_t *mesh)
 			VectorSubtract( v4->xyz, v1->xyz, d1 );
 			VectorSubtract( v3->xyz, v1->xyz, d2 );
 			CrossProduct( d2, d1, plane.normal );
-			if ( OM_VectorNormalize( plane.normal, plane.normal ) != 0 )
+			if ( VectorNormalize( plane.normal, plane.normal ) != 0 )
 			{
 				plane.dist = DotProduct( v1->xyz, plane.normal );
 				dot = DotProduct(plane.normal, v2->xyz) - plane.dist;
@@ -1174,7 +1173,7 @@ qboolean VL_PlaneFromPoints( plane_t *plane, const vec3_t a, const vec3_t b, con
 	VectorSubtract( b, a, d1 );
 	VectorSubtract( c, a, d2 );
 	CrossProduct( d2, d1, plane->normal );
-	if ( OM_VectorNormalize( plane->normal, plane->normal ) == 0 ) {
+	if ( VectorNormalize( plane->normal, plane->normal ) == 0 ) {
 		return qfalse;
 	}
 
@@ -1193,7 +1192,7 @@ void VL_GenerateBoundaryForPoints( plane_t *boundary, plane_t *plane, vec3_t a, 
 	// make a perpendicular vector to the edge and the surface
 	VectorSubtract( a, b, d1 );
 	CrossProduct( plane->normal, d1, boundary->normal );
-	OM_VectorNormalize( boundary->normal, boundary->normal );
+	VectorNormalize( boundary->normal, boundary->normal );
 	boundary->dist = DotProduct( a, boundary->normal );
 }
 
@@ -2088,7 +2087,7 @@ void VL_SmoothenLightmapEdges(void)
 				// try one row or column further because on flat faces the lightmap can
 				// extend beyond the edge
 				VectorSubtract(p[1], p[0], dir);
-				OM_VectorNormalize(dir, dir);
+				VectorNormalize(dir, dir);
 				CrossProduct(dir, facet1->plane.normal, cross);
 				//
 				if (coords1[0][0] - coords1[1][0] == 0)
@@ -2895,7 +2894,7 @@ void VL_LightSurfaceWithVolume( int surfaceNum, int facetNum, vlight_t *light, l
 			if ( ds->patchWidth ) {
 				numPositions = 9;
 				VectorCopy( mesh->verts[j*mesh->width+i].normal, normal );
-				// OM_VectorNormalize( normal, normal );
+				// VectorNormalize( normal, normal );
 				// push off of the curve a bit
 				VectorMA( mesh->verts[j*mesh->width+i].xyz, 1, normal, base );
 
@@ -2911,7 +2910,7 @@ void VL_LightSurfaceWithVolume( int surfaceNum, int facetNum, vlight_t *light, l
 			VectorAdd( base, surfaceOrigin[ surfaceNum ], base );
 
 			VectorSubtract(base, light->origin, dir);
-			dist = OM_VectorNormalize(dir, dir);
+			dist = VectorNormalize(dir, dir);
 			if ( dist < 16 ) {
 				dist = 16;
 			}
@@ -3427,7 +3426,7 @@ void VL_LightSurfaceWithVolume( int surfaceNum, int facetNum, vlight_t *light, l
 					coneScale = ( radiusAtDist - sampleRadius ) / 32.0;
 				}
 				
-				dist = OM_VectorNormalize( dir, dir );
+				dist = VectorNormalize( dir, dir );
 				// clamp the distance to prevent super hot spots
 				if ( dist < 16 ) {
 					dist = 16;
@@ -3494,7 +3493,7 @@ void VL_LightSurfaceWithVolume( int surfaceNum, int facetNum, vlight_t *light, l
 				d = DotProduct(base, light->normal) - DotProduct(light->normal, light->w.points[0]);
 				VectorMA(base, -d, light->normal, origin);
 				VectorSubtract(origin, base, dir);
-				dist = OM_VectorNormalize(dir, dir);
+				dist = VectorNormalize(dir, dir);
 				if ( dist < 16 ) {
 					dist = 16;
 				}
@@ -3542,7 +3541,7 @@ void VL_LightSurfaceWithVolume( int surfaceNum, int facetNum, vlight_t *light, l
 			else //normal radial point light
 			{
 				VectorSubtract(light->origin, base, dir);
-				dist = OM_VectorNormalize(dir, dir);
+				dist = VectorNormalize(dir, dir);
 				if ( dist < 16 ) {
 					dist = 16;
 				}
@@ -4145,7 +4144,7 @@ void VL_R_FloodLight(vlight_t *light, lightvolume_t *volume, int cluster, int fi
 					{
 						VectorSubtract(winding.points[(k+1) % winding.numpoints], winding.points[k], dir1);
 						CrossProduct(light->normal, dir1, plane.normal);
-						OM_VectorNormalize(plane.normal, plane.normal);
+						VectorNormalize(plane.normal, plane.normal);
 						plane.dist = DotProduct(plane.normal, winding.points[k]);
 					}
 					else
@@ -4153,7 +4152,7 @@ void VL_R_FloodLight(vlight_t *light, lightvolume_t *volume, int cluster, int fi
 						VectorSubtract(winding.points[(k+1) % winding.numpoints], winding.points[k], dir1);
 						VectorSubtract(light->origin, winding.points[k], dir2);
 						CrossProduct(dir1, dir2, plane.normal);
-						OM_VectorNormalize(plane.normal, plane.normal);
+						VectorNormalize(plane.normal, plane.normal);
 						plane.dist = DotProduct(plane.normal, winding.points[k]);
 					}
 					res = VL_R_SplitLightVolume(light, volume, &plane, cluster, 0);
@@ -4238,7 +4237,7 @@ void VL_R_FloodLight(vlight_t *light, lightvolume_t *volume, int cluster, int fi
 			{
 				VectorSubtract(p->winding->points[(k+1) % p->winding->numpoints], p->winding->points[k], dir1);
 				CrossProduct(light->normal, dir1, plane.normal);
-				OM_VectorNormalize(plane.normal, plane.normal);
+				VectorNormalize(plane.normal, plane.normal);
 				plane.dist = DotProduct(plane.normal, p->winding->points[k]);
 			}
 			else
@@ -4246,7 +4245,7 @@ void VL_R_FloodLight(vlight_t *light, lightvolume_t *volume, int cluster, int fi
 				VectorSubtract(p->winding->points[(k+1) % p->winding->numpoints], p->winding->points[k], dir1);
 				VectorSubtract(light->origin, p->winding->points[k], dir2);
 				CrossProduct(dir1, dir2, plane.normal);
-				OM_VectorNormalize(plane.normal, plane.normal);
+				VectorNormalize(plane.normal, plane.normal);
 				plane.dist = DotProduct(plane.normal, p->winding->points[k]);
 			}
 			res = VL_R_SplitLightVolume(light, volume, &plane, cluster, i+1);
@@ -4409,7 +4408,7 @@ void VL_FloodDirectedLight(vlight_t *light, winding_t *w, int leafnum)
 		VectorMA(w->points[i], dist, light->normal, volume.points[i]);
 		VectorSubtract(w->points[(i+1)%w->numpoints], w->points[i], dir);
 		CrossProduct(light->normal, dir, volume.planes[i].normal);
-		OM_VectorNormalize(volume.planes[i].normal, volume.planes[i].normal);
+		VectorNormalize(volume.planes[i].normal, volume.planes[i].normal);
 		volume.planes[i].dist = DotProduct(volume.planes[i].normal, w->points[i]);
 	}
 	volume.numplanes = w->numpoints;
@@ -5071,7 +5070,7 @@ void VL_CreateEntityLights (void)
 			} else {
 				GetVectorForKey (e2, "origin", dest);
 				VectorSubtract (dest, dl->origin, dl->normal);
-				dist = OM_VectorNormalize (dl->normal, dl->normal);
+				dist = VectorNormalize (dl->normal, dl->normal);
 				radius = FloatForKey (e, "radius");
 				if ( !radius ) {
 					radius = 64;
@@ -5355,7 +5354,7 @@ void VL_CreateSkyLights(void)
 	vec3_t sunColor, sunDir = { 0.45, 0.3, 0.9 };
 	float d;
 
-	OM_VectorNormalize(sunDir, sunDir);
+	VectorNormalize(sunDir, sunDir);
 	VectorInverse(sunDir);
 
 	c_skyLights = 0;
@@ -5448,7 +5447,7 @@ void VL_PlaneFromWinding (winding_t *w, plane_t *plane)
 	VectorSubtract (w->points[2], w->points[1], v1);
 	VectorSubtract (w->points[0], w->points[1], v2);
 	CrossProduct (v2, v1, plane->normal);
-	OM_VectorNormalize (plane->normal, plane->normal);
+	VectorNormalize (plane->normal, plane->normal);
 	plane->dist = DotProduct (w->points[0], plane->normal);
 }
 

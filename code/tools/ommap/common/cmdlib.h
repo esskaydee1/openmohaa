@@ -52,17 +52,7 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #ifndef __BYTEBOOL__
 #define __BYTEBOOL__
-// qboolean/qtrue/qfalse: skip these when qcommon/q_shared.h (Q_SHARED_H)
-// is already in scope - bspfile.h pulls that header in for every one of
-// this tool's actual compile targets (see its "use qfiles.h from OpenMoHAA
-// codebase" comment), and its version (typedef int + a separate enum for
-// the values) would otherwise conflict with an enum-typedef declared here.
-// But a handful of this tool's own .c files (cmdlib.c itself included)
-// only ever include this header directly, so it still needs to provide a
-// working fallback definition for those.
-#ifndef Q_SHARED_H
 typedef enum { qfalse, qtrue } qboolean;
-#endif
 typedef unsigned char byte;
 #endif
 
@@ -126,26 +116,15 @@ void	ExtractFileExtension( const char *path, char *dest );
 
 int 	ParseNum (const char *str);
 
-// BigShort/LittleShort/BigLong/LittleLong/BigFloat/LittleFloat: same
-// Q_SHARED_H deferral as qboolean above - q_platform.h provides these as
-// macros (not functions) once it's in scope, which collides with a plain
-// function prototype here; but imagelib.c and others call these directly
-// with only this header in scope, so the fallback declaration still has
-// to exist for when q_platform.h isn't already included.
-#ifndef Q_SHARED_H
 short	BigShort (short l);
 short	LittleShort (short l);
 int		BigLong (int l);
 int		LittleLong (int l);
 float	BigFloat (float l);
 float	LittleFloat (float l);
-#endif
 
-// COM_Parse is NOT re-declared to the engine's version: the two have
-// incompatible signatures (this one takes/returns a plain char*, the
-// engine's advances a char** in place), and cmdlib.c's own COM_Parse is
-// only ever called from within cmdlib.c itself, so it doesn't need a
-// header declaration at all here.
+
+char *COM_Parse (char *data);
 
 extern	char		com_token[1024];
 extern	qboolean	com_eof;

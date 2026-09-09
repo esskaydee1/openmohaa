@@ -21,10 +21,9 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 */
 // vis.h
 
-// bspfile.h has to come first - see the matching note in qbsp.h.
-#include "bspfile.h"
 #include "cmdlib.h"
 #include "mathlib.h"
+#include "bspfile.h"
 
 #define	MAX_PORTALS	32768
 

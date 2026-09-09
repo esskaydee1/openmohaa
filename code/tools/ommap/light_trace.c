@@ -42,7 +42,7 @@ void CM_GenerateBoundaryForPoints( float boundary[4], float plane[4], vec3_t a, 
 	// amke a perpendicular vector to the edge and the surface
 	VectorSubtract( b, a, d1 );
 	CrossProduct( plane, d1, boundary );
-	OM_VectorNormalize( boundary, boundary );
+	VectorNormalize( boundary, boundary );
 	boundary[3] = DotProduct( a, boundary );
 }
 
@@ -418,7 +418,7 @@ void GenerateBoundaryForPoints( float boundary[4], float plane[4], vec3_t a, vec
 	// amke a perpendicular vector to the edge and the surface
 	VectorSubtract( b, a, d1 );
 	CrossProduct( plane, d1, boundary );
-	OM_VectorNormalize( boundary, boundary );
+	VectorNormalize( boundary, boundary );
 	boundary[3] = DotProduct( a, boundary );
 }
 
@@ -781,7 +781,7 @@ qboolean	SphereCull( vec3_t start, vec3_t stop, vec3_t origin, float radius ) {
 	vec3_t		on;
 
 	VectorSubtract( stop, start, dir );
-	len = OM_VectorNormalize( dir, dir );
+	len = VectorNormalize( dir, dir );
 
 	VectorSubtract( origin, start, v );
 	d = DotProduct( v, dir );
@@ -863,7 +863,7 @@ testAll to true
 */
 extern qboolean	patchshadows;
 
-void TraceLine( const vec3_t start, const vec3_t stop, lighttrace_t *trace, qboolean testAll, traceWork_t *tw ) {
+void TraceLine( const vec3_t start, const vec3_t stop, trace_t *trace, qboolean testAll, traceWork_t *tw ) {
 	int				r;
 	int				i, j;
 	dleaf_t			*leaf;

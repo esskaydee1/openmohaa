@@ -104,7 +104,7 @@ void ParsePatch( void ) {
 	numMapIndexedShaders++;
 
 
-	OM_Parse1DMatrix( 5, info );
+	Parse1DMatrix( 5, info );
 	m.width = info[0];
 	m.height = info[1];
 	m.verts = verts = malloc( m.width * m.height * sizeof( m.verts[0] ) );
@@ -118,7 +118,7 @@ void ParsePatch( void ) {
 	for ( j = 0 ; j < m.width ; j++ ) {
 		MatchToken( "(" );
 		for ( i = 0 ; i < m.height ; i++ ) {
-			OM_Parse1DMatrix( 5, verts[i*m.width+j].xyz );
+			Parse1DMatrix( 5, verts[i*m.width+j].xyz );
 		}
 		MatchToken( ")" );
 	}

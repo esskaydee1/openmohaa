@@ -20,18 +20,13 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
 
-// bspfile.h pulls in the engine's qcommon/qfiles.h, which is the canonical
-// source for qboolean/byte/vec2_t..vec4_t/SIDE_* (see the notes in
-// cmdlib.h/mathlib.h) - it has to come first so the rest of these headers,
-// which declare functions using those types, see them already defined
-// instead of colliding with them.
-#include "bspfile.h"
 #include "cmdlib.h"
 #include "mathlib.h"
 #include "scriplib.h"
 #include "polylib.h"
 #include "imagelib.h"
 #include "threads.h"
+#include "bspfile.h"
 #include "shaders.h"
 #include "mesh.h"
 
@@ -309,9 +304,7 @@ bspbrush_t *MakeBspBrushList ( bspbrush_t *brushes,	vec3_t clipmins, vec3_t clip
 #define	PSIDE_BOTH			(PSIDE_FRONT|PSIDE_BACK)
 #define	PSIDE_FACING		4
 
-// BoxOnPlaneSide: dead declaration, no implementation or caller anywhere
-// in this tool (and it'd collide with the engine's own same-named function
-// - different plane-struct type - if left in); removed rather than fixed.
+int BoxOnPlaneSide (vec3_t mins, vec3_t maxs, plane_t *plane);
 qboolean WindingIsTiny (winding_t *w);
 
 void SplitBrush (bspbrush_t *brush, int planenum,

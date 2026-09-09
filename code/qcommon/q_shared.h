@@ -25,14 +25,6 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #pragma once
 
-// Purely-additive sentinel, not used anywhere else in the engine: lets
-// code/tools/ommap's own vendored cmdlib.h/mathlib.h/mesh.h (which predate
-// this file and declare a handful of the same-named types/functions)
-// detect whether this header already won and skip their own conflicting
-// versions, without changing anything for every other translation unit
-// that includes this file the normal way.
-#define Q_SHARED_H
-
 #if defined(__cplusplus)
 extern "C" {
 #endif

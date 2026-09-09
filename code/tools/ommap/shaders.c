@@ -22,16 +22,14 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include <string.h>
 #include <math.h>
-
-// su44: use qfiles.h from OpenMoHAA codebase - has to come first, see the
-// matching note in qbsp.h.
-#include "../../../qcommon/qfiles.h"
-#include "../../../qcommon/surfaceflags.h"
-
 #include "cmdlib.h"
 #include "mathlib.h"
 #include "imagelib.h"
 #include "scriplib.h"
+
+// su44: use qfiles.h from OpenMoHAA codebase
+#include "../../../qcommon/qfiles.h"
+#include "../../../qcommon/surfaceflags.h"
 
 #include "shaders.h"
 #ifdef _WIN32
@@ -521,7 +519,7 @@ static void ParseShaderFile( const char *filename ) {
 				GetToken( qfalse );
 				si->sunLight[2] = atof( token );
 				
-				OM_VectorNormalize( si->sunLight, si->sunLight);
+				VectorNormalize( si->sunLight, si->sunLight);
 
 				GetToken( qfalse );
 				a = atof( token );
@@ -588,28 +586,23 @@ LoadShaderInfo
 ===============
 */
 #define	MAX_SHADER_FILES	512
-#ifdef _WIN32
 #include <io.h>
-#endif
 void LoadShaderInfo( void ) {
 	char			filename[1024];
 	int				i;
 	char			*shaderFiles[MAX_SHADER_FILES];
-	int				numShaderFiles = 0;
+	int				numShaderFiles;
 	FILE *f;
 
 	sprintf( filename, "%sscripts/shaderlist.txt", gamedir );
 
 	f = fopen(filename,"rb");
 	if(f == 0) {
-#ifdef _WIN32
 		// if there is no shaderlist.txt in scripts dir, scan for shader files
-		// (Windows-only fallback - real installs always ship shaderlist.txt,
-		// so this was never adapted for other platforms; not needed here.)
 		struct _finddata_t fileinfo;
 		char scriptsDir[1024];
 		int handle;
-		sprintf( scriptsDir, "%sscripts/*.shader", gamedir );
+		sprintf( scriptsDir, "%sscripts/*.shader", gamedir );	
 		handle = _findfirst (scriptsDir, &fileinfo);
 		if (handle != -1)
 		{
@@ -622,7 +615,6 @@ void LoadShaderInfo( void ) {
 			} while (_findnext( handle, &fileinfo ) != -1);
 			_findclose (handle);
 		}
-#endif
 	} else {
 		fclose(f);
 
