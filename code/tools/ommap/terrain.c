@@ -409,7 +409,7 @@ void CreateTerrainSurface( terrainSurf_t *surf, shaderInfo_t *shader ) {
 			}
 		}
 
-		VectorNormalize( out->normal, out->normal );
+		OM_VectorNormalize( out->normal, out->normal );
 	}
 }
 

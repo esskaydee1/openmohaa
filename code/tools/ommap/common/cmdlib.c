@@ -34,6 +34,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <libc.h>
 #endif
 
+#ifndef WIN32
+#include <unistd.h>	// getcwd
+#endif
+
 #define	BASEDIRNAME	"MoHAA"		// assumed to have a 2 or 3 following
 #define	BASEDIRNAME2	"build"		// for OpenMoHAA
 #define PATHSEPERATOR   '/'
@@ -179,7 +183,9 @@ UINT wm_BroadcastCommand = -1;
 void _printf( const char *format, ... ) {
 	va_list argptr;
   char text[4096];
+#ifdef WIN32
   ATOM a;
+#endif
 
 	va_start (argptr,format);
 	vsprintf (text, format, argptr);
@@ -428,7 +434,9 @@ void Q_getwd (char *out)
    _getcwd (out, 256);
    strcat (out, "\\");
 #else
-   getwd (out);
+   // getwd() was removed from modern libc (macOS/glibc) in favor of the
+   // bounds-checked getcwd() - same call shape as the _getcwd() above.
+   getcwd (out, 256);
    strcat (out, "/");
 #endif
 

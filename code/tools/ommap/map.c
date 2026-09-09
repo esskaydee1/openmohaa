@@ -169,10 +169,10 @@ int CreateNewFloatPlane (vec3_t normal, vec_t dist)
 
 /*
 ==============
-SnapVector
+OM_SnapNormal
 ==============
 */
-void	SnapVector (vec3_t normal)
+void	OM_SnapNormal (vec3_t normal)
 {
 	int		i;
 
@@ -200,7 +200,7 @@ SnapPlane
 */
 void	SnapPlane (vec3_t normal, vec_t *dist)
 {
-	SnapVector (normal);
+	OM_SnapNormal (normal);
 
 	if (fabs(*dist-Q_rint(*dist)) < DIST_EPSILON)
 		*dist = Q_rint(*dist);
@@ -265,7 +265,7 @@ int MapPlaneFromPoints (vec3_t p0, vec3_t p1, vec3_t p2) {
 	VectorSubtract (p0, p1, t1);
 	VectorSubtract (p2, p1, t2);
 	CrossProduct (t1, t2, normal);
-	VectorNormalize (normal, normal);
+	OM_VectorNormalize (normal, normal);
 
 	dist = DotProduct (p0, normal);
 
@@ -442,9 +442,9 @@ void AddBrushBevels( void ) {
 		  {
 			  k = (j+1)%w->numpoints;
 			  VectorSubtract (w->p[j], w->p[k], vec);
-			  if (VectorNormalize (vec, vec) < 0.5)
+			  if (OM_VectorNormalize (vec, vec) < 0.5)
 				  continue;
-			  SnapVector (vec);
+			  OM_SnapNormal (vec);
 			  for (k=0 ; k<3 ; k++)
 				  if ( vec[k] == -1 || vec[k] == 1)
 					  break;	// axial
@@ -460,7 +460,7 @@ void AddBrushBevels( void ) {
 					  VectorClear (vec2);
 					  vec2[axis] = dir;
 					  CrossProduct (vec, vec2, normal);
-					  if (VectorNormalize (normal, normal) < 0.5)
+					  if (OM_VectorNormalize (normal, normal) < 0.5)
 						  continue;
 					  dist = DotProduct (w->p[j], normal);
 
@@ -804,13 +804,13 @@ void	ParseRawBrush( ) {
 		buildBrush->numsides++;
 
 		// read the three point plane definition
-		Parse1DMatrix( 3, planepts[0] );
-		Parse1DMatrix( 3, planepts[1] );
-		Parse1DMatrix( 3, planepts[2] );
+		OM_Parse1DMatrix( 3, planepts[0] );
+		OM_Parse1DMatrix( 3, planepts[1] );
+		OM_Parse1DMatrix( 3, planepts[2] );
 
 		if (g_bBrushPrimit==BPRIMIT_NEWBRUSHES)
 			// read the texture matrix
-			Parse2DMatrix( 2, 3, (float *)side->texMat );
+			OM_Parse2DMatrix( 2, 3, (float *)side->texMat );
 
 		// read the texturedef
 		GetToken (qfalse);

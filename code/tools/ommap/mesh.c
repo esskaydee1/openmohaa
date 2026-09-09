@@ -216,7 +216,7 @@ void MakeMeshNormals( mesh_t in ) {
 						break;					// edge of patch
 					}
 					VectorSubtract( in.verts[y*in.width+x].xyz, base, temp );
-					if ( VectorNormalize( temp, temp ) == 0 ) {
+					if ( OM_VectorNormalize( temp, temp ) == 0 ) {
 						continue;				// degenerate edge, get more dist
 					} else {
 						good[k] = qtrue;
@@ -232,7 +232,7 @@ void MakeMeshNormals( mesh_t in ) {
 					continue;	// didn't get two points
 				}
 				CrossProduct( around[(k+1)&7], around[k], normal );
-				if ( VectorNormalize( normal, normal ) == 0 ) {
+				if ( OM_VectorNormalize( normal, normal ) == 0 ) {
 					continue;
 				}
 				VectorAdd( normal, sum, sum );
@@ -242,7 +242,7 @@ void MakeMeshNormals( mesh_t in ) {
 //_printf("bad normal\n");
 				count = 1;
 			}
-			VectorNormalize( sum, dv->normal );
+			OM_VectorNormalize( sum, dv->normal );
 		}
 	}
 }
@@ -454,7 +454,7 @@ void ProjectPointOntoVector( vec3_t point, vec3_t vStart, vec3_t vEnd, vec3_t vP
 
 	VectorSubtract( point, vStart, pVec );
 	VectorSubtract( vEnd, vStart, vec );
-	VectorNormalize( vec, vec );
+	OM_VectorNormalize( vec, vec );
 	// project onto the directional vector for this segment
 	VectorMA( vStart, DotProduct( pVec, vec ), vec, vProj );
 }
@@ -561,7 +561,7 @@ void LerpDrawVertAmount( drawVert_t *a, drawVert_t *b, float amount, drawVert_t 
 	out->normal[0] = a->normal[0] + amount * (b->normal[0] - a->normal[0]);
 	out->normal[1] = a->normal[1] + amount * (b->normal[1] - a->normal[1]);
 	out->normal[2] = a->normal[2] + amount * (b->normal[2] - a->normal[2]);
-	VectorNormalize(out->normal, out->normal);
+	OM_VectorNormalize(out->normal, out->normal);
 }
 
 /*

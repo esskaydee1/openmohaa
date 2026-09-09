@@ -45,4 +45,9 @@ void MakeMeshNormals( mesh_t in );
 void PutMeshOnCurve( mesh_t in );
 
 
+// MakeNormalVectors: same Q_SHARED_H deferral as the mathlib.h block - the
+// engine's qcommon/q_shared.h already declares this (const-qualified) once
+// it's in scope.
+#ifndef Q_SHARED_H
 void MakeNormalVectors (vec3_t forward, vec3_t right, vec3_t up);
+#endif

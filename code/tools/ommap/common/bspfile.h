@@ -99,7 +99,7 @@ extern	int			numStaticModelVertColors;
 extern	byte		staticModelVertColors[MAX_MAP_STATICMODELVERTCOLORS];
 
 extern	int			numSideEquations;
-extern	dsideEquation_t sideEquations[MAX_MAP_SIDEEQATIONS];
+extern	dsideequation_t sideEquations[MAX_MAP_SIDEEQATIONS];
 
 extern	int			numSphereLights;
 extern	dspherel_t	sphereLights[MAX_MAP_SPHERELIGHTS];

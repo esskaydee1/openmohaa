@@ -26,12 +26,22 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
 #include <math.h>
 
+// vec_t/vec2_t/vec3_t/vec4_t, SIDE_FRONT/SIDE_BACK/SIDE_ON/SIDE_CROSS, and
+// DEG2RAD/RAD2DEG: same Q_SHARED_H deferral as cmdlib.h - the engine's
+// qcommon/q_shared.h already provides all of these once it's in scope
+// (bspfile.h always pulls it in for this tool's real compile targets), but
+// several of this tool's own .c files only ever include this header
+// directly, so a fallback still has to exist. (DOUBLEVEC_T is never
+// defined in this build, so the old vec_t here was always `float` anyway,
+// same as the engine's; the old vec2_t was actually a bug - sized [3]
+// instead of [2], fixed here to match the engine's.)
+#ifndef Q_SHARED_H
 #ifdef DOUBLEVEC_T
 typedef double vec_t;
 #else
 typedef float vec_t;
 #endif
-typedef vec_t vec2_t[3];
+typedef vec_t vec2_t[2];
 typedef vec_t vec3_t[3];
 typedef vec_t vec4_t[4];
 
@@ -40,9 +50,11 @@ typedef vec_t vec4_t[4];
 #define	SIDE_BACK		1
 #define	SIDE_CROSS		-2
 
-#define	Q_PI	3.14159265358979323846
 #define DEG2RAD( a ) ( ( (a) * Q_PI ) / 180.0F )
 #define RAD2DEG( a ) ( ( (a) * 180.0f ) / Q_PI )
+#endif
+
+#define	Q_PI	3.14159265358979323846
 
 extern vec3_t vec3_origin;
 
@@ -67,20 +79,36 @@ qboolean VectorCompare( const vec3_t v1, const vec3_t v2 );
 void Vec10Copy( vec_t *in, vec_t *out );
 
 vec_t Q_rint (vec_t in);
+
+// _DotProduct/_VectorSubtract/_VectorAdd/_VectorCopy/_VectorScale/VectorMA/
+// VectorLength/CrossProduct/VectorInverse: same Q_SHARED_H deferral again -
+// the engine's qcommon/q_shared.h already declares (or, for several of
+// these, directly `static inline` defines) every one of them once it's in
+// scope, same math, just with `const` on the read-only params. But this
+// tool's own .c files that only include this header directly still need a
+// declaration to call them - mathlib.c's definitions (compiled either way)
+// then satisfy it.
+#ifndef Q_SHARED_H
 vec_t _DotProduct (vec3_t v1, vec3_t v2);
 void _VectorSubtract (vec3_t va, vec3_t vb, vec3_t out);
 void _VectorAdd (vec3_t va, vec3_t vb, vec3_t out);
 void _VectorCopy (vec3_t in, vec3_t out);
 void _VectorScale (vec3_t v, vec_t scale, vec3_t out);
-
 double VectorLength( const vec3_t v );
-
 void VectorMA( const vec3_t va, double scale, const vec3_t vb, vec3_t vc );
-
 void CrossProduct( const vec3_t v1, const vec3_t v2, vec3_t cross );
-vec_t VectorNormalize( const vec3_t in, vec3_t out );
-vec_t ColorNormalize( const vec3_t in, vec3_t out );
 void VectorInverse (vec3_t v);
+#endif
+//
+// OM_VectorNormalize/OM_Parse1DMatrix/OM_Parse2DMatrix/OM_Parse3DMatrix
+// (below, and in scriplib.h) are prefixed instead of removed: the engine
+// has same-named functions with genuinely different signatures/semantics
+// (VectorNormalize normalizes in place with one arg; this one takes
+// separate in/out args, and every one of this tool's ~15 call sites
+// already relies on that), so they'd silently miscompile rather than
+// fail to build if left under the original names.
+vec_t OM_VectorNormalize( const vec3_t in, vec3_t out );
+vec_t ColorNormalize( const vec3_t in, vec3_t out );
 
 void ClearBounds (vec3_t mins, vec3_t maxs);
 void AddPointToBounds( const vec3_t v, vec3_t mins, vec3_t maxs );

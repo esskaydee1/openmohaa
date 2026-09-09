@@ -46,9 +46,9 @@ qboolean TokenAvailable (void);
 
 void MatchToken( char *match );
 
-void Parse1DMatrix (int x, vec_t *m);
-void Parse2DMatrix (int y, int x, vec_t *m);
-void Parse3DMatrix (int z, int y, int x, vec_t *m);
+void OM_Parse1DMatrix (int x, vec_t *m);
+void OM_Parse2DMatrix (int y, int x, vec_t *m);
+void OM_Parse3DMatrix (int z, int y, int x, vec_t *m);
 
 void Write1DMatrix (FILE *f, int x, vec_t *m);
 void Write2DMatrix (FILE *f, int y, int x, vec_t *m);

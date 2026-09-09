@@ -79,7 +79,7 @@ qboolean PlaneFromPoints( vec4_t plane, const vec3_t a, const vec3_t b, const ve
 	VectorSubtract( b, a, d1 );
 	VectorSubtract( c, a, d2 );
 	CrossProduct( d2, d1, plane );
-	if ( VectorNormalize( plane, plane ) == 0 ) {
+	if ( OM_VectorNormalize( plane, plane ) == 0 ) {
 		return qfalse;
 	}
 
@@ -107,7 +107,7 @@ void MakeNormalVectors (vec3_t forward, vec3_t right, vec3_t up)
 
 	d = DotProduct (right, forward);
 	VectorMA (right, -d, forward, right);
-	VectorNormalize (right, right);
+	OM_VectorNormalize (right, right);
 	CrossProduct (right, forward, up);
 }
 
@@ -205,7 +205,7 @@ void _VectorScale (vec3_t v, vec_t scale, vec3_t out)
 	out[2] = v[2] * scale;
 }
 
-vec_t VectorNormalize( const vec3_t in, vec3_t out ) {
+vec_t OM_VectorNormalize( const vec3_t in, vec3_t out ) {
 	vec_t	length, ilength;
 
 	length = sqrt (in[0]*in[0] + in[1]*in[1] + in[2]*in[2]);
@@ -367,7 +367,7 @@ void PerpendicularVector( vec3_t dst, const vec3_t src )
 	/*
 	** normalize the result
 	*/
-	VectorNormalize( dst, dst );
+	OM_VectorNormalize( dst, dst );
 }
 
 /*

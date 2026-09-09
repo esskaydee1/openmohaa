@@ -20,9 +20,10 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 ===========================================================================
 */
 
+// bspfile.h has to come first - see the matching note in qbsp.h.
+#include "bspfile.h"
 #include "cmdlib.h"
 #include "mathlib.h"
-#include "bspfile.h"
 #include "polylib.h"
 #include "imagelib.h"
 #include "threads.h"
@@ -109,7 +110,7 @@ typedef struct {
 	vec3_t		hit;				// the impact point of a completely opaque surface
 	float		hitFraction;		// 0 = at start, 1.0 = at end
 	qboolean	passSolid;
-} trace_t;
+} lighttrace_t;
 
 extern	surfaceTest_t	*surfaceTest[MAX_MAP_DRAW_SURFS];
 
@@ -122,11 +123,11 @@ typedef struct {
 	vec3_t		start, end;
 	int			numOpenLeafs;
 	int			openLeafNumbers[MAX_MAP_LEAFS];
-	trace_t		*trace;
+	lighttrace_t		*trace;
 	int			patchshadows;
 } traceWork_t;
 
-void TraceLine( const vec3_t start, const vec3_t stop, trace_t *trace,
+void TraceLine( const vec3_t start, const vec3_t stop, lighttrace_t *trace,
 			   qboolean testAll, traceWork_t *tw );
 qboolean PointInSolid( vec3_t start );
 

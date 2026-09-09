@@ -299,7 +299,7 @@ void MatchToken( char *match ) {
 }
 
 
-void Parse1DMatrix (int x, vec_t *m) {
+void OM_Parse1DMatrix (int x, vec_t *m) {
 	int		i;
 
 	MatchToken( "(" );
@@ -314,15 +314,15 @@ void Parse1DMatrix (int x, vec_t *m) {
 	// su44: MoHAA patchDef2's sometimes have here additional keywords
 	while(1) {
 		GetToken( qtrue );
-		if(!stricmp(token,"subdivisions")) {
+		if(!Q_stricmp(token,"subdivisions")) {
 			GetToken( qtrue ); // value
-		} else if(!stricmp(token,"surfaceDensity")) {
+		} else if(!Q_stricmp(token,"surfaceDensity")) {
 			GetToken( qtrue ); // value
-		} else if(!stricmp(token,"+surfaceparm")) {
+		} else if(!Q_stricmp(token,"+surfaceparm")) {
 			GetToken( qtrue ); // flagname
-		} else if(!stricmp(token,"-surfaceparm")) {
+		} else if(!Q_stricmp(token,"-surfaceparm")) {
 			GetToken( qtrue ); // flagname		
-		} else if(!stricmp(token,"surfaceColor")) {
+		} else if(!Q_stricmp(token,"surfaceColor")) {
 			GetToken( qtrue );	
 			GetToken( qtrue );	
 			GetToken( qtrue );	
@@ -332,30 +332,30 @@ void Parse1DMatrix (int x, vec_t *m) {
 	}
 
 	if ( strcmp( token, ")" ) ) {
-		Error( "Parse1DMatrix: MatchToken( \"%s\" ) failed at line %i", ")", scriptline );
+		Error( "OM_Parse1DMatrix: MatchToken( \"%s\" ) failed at line %i", ")", scriptline );
 	}
 #endif
 }
 
-void Parse2DMatrix (int y, int x, vec_t *m) {
+void OM_Parse2DMatrix (int y, int x, vec_t *m) {
 	int		i;
 
 	MatchToken( "(" );
 
 	for (i = 0 ; i < y ; i++) {
-		Parse1DMatrix (x, m + i * x);
+		OM_Parse1DMatrix (x, m + i * x);
 	}
 
 	MatchToken( ")" );
 }
 
-void Parse3DMatrix (int z, int y, int x, vec_t *m) {
+void OM_Parse3DMatrix (int z, int y, int x, vec_t *m) {
 	int		i;
 
 	MatchToken( "(" );
 
 	for (i = 0 ; i < z ; i++) {
-		Parse2DMatrix (y, x, m + i * x*y);
+		OM_Parse2DMatrix (y, x, m + i * x*y);
 	}
 
 	MatchToken( ")" );

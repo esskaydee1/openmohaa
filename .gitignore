@@ -60,14 +60,8 @@ out
 /omohaaded
 /launch_openmohaa_*
 /renderer_opengl*.dylib
-/renderer_metal.dylib
 /cgame.dylib
 /game.dylib
-
-# Vendored ANGLE build (Metal backend for renderer_metal): the dylibs are a
-# multi-hundred-MB local build output, not something to commit. Headers are
-# small/text and stay tracked so the renderer_metal source is self-contained.
-/code/thirdparty/libs/macos/angle/*.dylib
 /gog-download/
 /community-mods/
 /blurred-rememberance/
